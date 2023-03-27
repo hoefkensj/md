@@ -1,0 +1,921 @@
+## Introduction
+
+The install described in this tutorial attempts to follow the 'stock' process from the Gentoo Handbook where possible, but differs in a number of important respects. Specifically:
+
+*	The kernel will be configured to self-boot under UEFI
+	*	no separate bootloader is needed.
+	*	we will
+*	Secure boot can be enabled. 
+	*	The kernel will be signed with our own, generated key
+* We will create an initramfs to allow the GPG / LUKS / LVM stuff to happen in early userspace, and this RAM disk will be stored 			inside the kernel itself, so it will work under EFI with secure boot (we'll also, for reasons that will become clear later, build a 						custom version of gpg to use in this step).
+ *  For all you source-code paranoiacs, the Gentoo toolchain and core system will be bootstrapped during the install (simulating 			an old-school stage-1) and we'll validate that all binary executables and libraries have indeed been rebuilt from source when 				done
+ *  All Gentoo repository syncs (including the initial emerge-webrsync) will be performed with gpg signature 																	authentication. Unauthenticated protocols will not be used.
+* I'll provide simple scripts to automate the EFI kernel creation process and keep your system up-to-date. The first of these (buildkernel) handles conforming the kernel config for EFI encrypted boot (including setting the kernel command line correctly), creating the initramfs, building and signing the kernel, and installing it on the EFI system partition. The second (genup) automates the process of updating your system software via emerge and associated tools. The scripts are shipped in an ebuild repository (aka 'overlay'), for easy deployment.
+* Lastly, detailed (optional) instructions for disabling the Intel Management Engine[2] will be provided (for those with Intel-CPU-based PCs who find this out-of-band coprocessor an unacceptable security risk), as will instructions for fully sandboxing the popular firefox web browser, using firejail
+
+
+```sh
+export MIRROR="http://mirror.yandex.ru/gentoo-distfiles/releases/amd64/autobuilds/"
+export LATEST="latest-stage3-amd64-desktop-systemd-mergedusr.txt"
+export STAGE3_URL="${MIRROR}$(curl  --silent $MIRROR$LATEST | tail -n1 |awk '{print $1}')"                                                                                                                                    
+```
+
+
+```sh
+su -c 'mkdir -p /mnt/{ESP,gentoo,temp}'
+su -c 'chmod 777 /mnt/{ESP,gentoo,temp}'
+cd /mnt/temp
+wget -c "${STAGE3_URL}"
+wget -c "${STAGE3_URL}.CONTENTS.gz"
+wget -c "${STAGE3_URL}.DIGESTS"
+wget -c "${STAGE3_URL}.asc"
+wget -c "${STAGE3_URL}.sha256"
+```
+
+GENTOO Signing keys:
+```sh
+wget -O - https://qa-reports.gentoo.org/output/service-keys.gpg | gpg --import
+```
+
+or only the release signing key: (automated)
+```sh
+gpg --keyserver hkps://keys.gentoo.org --recv-keys D99EAC7379A850BCE47DA5F29E6438C817072058
+```
+then verify:
+```sh
+gpg --verify "${LATEST}.asc"
+gpg --verify stage3-amd64-*.tar.xz.DIGESTS.asc
+awk '/SHA512 HASH/{getline;print}' stage3-amd64-*.tar.xz.DIGESTS.asc | sha512sum --check 
+
+```
+
+```
+mv -v  stage3-*.tar.xz /mnt/gentoo
+cd /mnt/gentoo
+tar xpvf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner
+#tar xvJpf stage3-amd64-*.tar.xz --xattrs-include='*.*' --numeric-owner 
+```
+
+ wiki.gentoo.org
+User:Sakaki/Sakaki's EFI Install Guide/Preparing the LUKS-LVM Filesystem and Boot USB Key
+33-42 minutes
+
+
+In this section, we'll be shadowing Chapter 4 of the Gentoo handbook (and, although we're going to start to diverge considerably, you may want to read that chapter before proceeding, as it has some useful background information).
+
+The process we'll be following here is:
+
+
+*	we will create a new GPT (GUID partition table) partition on the target machine's main drive, using the space we freed up from Windows earlier in the tutorial.
+    We'll then (optionally) overwrite that partition with pseudo-random data.
+    Next, we'll format the partition using LUKS (secured with the key data created in step 2).
+    We'll then (optionally) add a fallback passphrase to the LUKS container.
+    Then, we'll create an LVM physical volume (PV) on the LUKS partition, create an LVM volume group (VG) with just that one physical volume in it, and then create three logical volumes (LVs) (for the Gentoo root, swap and home partitions) utilizing that physical volume.
+    Finally, we'll format the logical volumes appropriately, and mount them so that they can be used in the rest of the installation.
+
+Let's go!
+Formatting and Mounting the UEFI-Bootable USB Key
+
+We are going to use our smaller (>= 250 MB) USB key as the boot device for Gentoo Linux. Since we want it to work under UEFI, we must format it using GPT with a single fat32 EFI system partition.
+
+Warning
+This process will wipe everything on the USB key, so be sure to back it up if necessary.
+
+Issue (using of course the ssh / screen terminal we have just established):
+
+And note the output. Then, insert the smaller capacity USB key into one of the remaining free USB slots on the target machine, and determine its device path. We will refer to its path in these instructions as /dev/sdY, but in reality on your system it will be something like /dev/sdc, /dev/sdd etc. You can find what it is, by issuing lsblk again, and noting what has changed:
+
+(note that the initial /dev/ prefix is not shown in the lsblk output)
+
+The minimal-install image shouldn't auto-mount the USB key, even if it has any existing partitions, but double-check to make sure (no mountpoints for the device should be shown in the output of the above command).
+
+Now, using parted, we will create a single primary partition, sized so as to fill the USB key completely (you can of course use a more modest extent if your drive is much larger than the minimum required size), and set its somewhat confusingly named 'boot' flag (i.e., mark the partition as a GPT system partition). Issue:
+
+livecd ~ #parted -a optimal /dev/sdY
+
+GNU Parted 3.2
+... additional output suppressed ...
+(parted) mklabel gpt
+Warning: The existing disk label on /dev/sdY will be destroyed and all data on
+this disk will be lost. Do you want to continue?
+Yes/No? yes
+(parted) mkpart primary fat32 0% 100%
+(parted) set 1 BOOT on
+(parted) quit
+
+Note
+Replace /dev/sdY in the above command with the path of the USB key you found above, such as /dev/sdc or /dev/sdd etc.
+
+Next, we need to format the partition fat32:
+
+livecd ~ #mkfs.vfat -F32 /dev/sdY1
+
+Note
+Replace /dev/sdY1 in the above command with the path of first partition on the USB key, such as /dev/sdc1 or /dev/sdd1 etc.
+
+Tip
+On some machines, a new drive letter will be assigned to the USB key after it has been edited by parted in this fashion. For example, if the drive was /dev/sdc prior to editing, it may become /dev/sdd afterwards. For avoidance of doubt, this issue will not affect most users; but, it is simple to check, by using lsblk.
+
+Now we create a temporary mountpoint and mount the partition:
+
+livecd ~ #mkdir -v /tmp/efiboot
+
+livecd ~ #mount -v -t vfat /dev/sdY1 /tmp/efiboot
+
+Note
+As before, remember to subsitute for /dev/sdY1 in the above.
+Creating a Password-Protected Keyfile for LUKS
+
+We will next create a (pseudo) random keyfile (for use with LUKS). This keyfile will be encrypted with GPG (using a typed-in passphrase) and then stored on the USB key.
+
+The point of this is to establish dual-factor security - both the (encrypted) keyfile, and your passphrase (to decrypt it) will be required to access the LUKS data stored on the target machine's hard drive. This means that even if a keylogger is present, should the machine be stolen - powered down but without the USB key - the LUKS data will still be safe (as the thief will not have your encrypted keyfile). Similarly, (assuming no keylogger!) if your machine were to be stolen powered down but with the USB key still in it, it will also not be possible to access your LUKS data (as in this case the thief will not know your passphrase).
+
+Note that we are going to create a (one byte short of) 8192KiB underlying (i.e., binary plaintext) keyfile, even though, for the symmetric LUKS cipher we'll be using (Serpent), the maximum supported key size is 256 bits (32 bytes) (or two 256 bit keys = 512 bits = 64 bytes in XTS mode, as explained later). This works because LUKS / cryptsetup uses the PBKDF2 key derivation function to map the keyfile into the actual (user) key material internally (which in turn is used to unlock the master key actually used for sector encryption / decryption), so we are free, within limits, to choose whatever size keyfile we want. As such, we elect to use the largest legal size, so as to make it (very slightly) harder for any data capture malware (in low-level drivers, for example) to intercept the file and squirrel it away, or transmit it over the network surreptitiously. In theory, the cryptsetup system can support keyfiles up to and including 8192KiB (execute cryptsetup --help to verify this); in practice, due to a off-by-one bug, it supports only keyfiles strictly less than 8MiB. We therefore create a keyfile of length (1024 * 8192) - 1 = 8388607 bytes.
+
+Note that we'll use the /dev/urandom source to create the underlying (binary plaintext) pseudo-random keyfile, and then pipe it to gpg to encrypt (using a passphrase of your choosing). The resulting binary ciphertext is saved to the USB key. This avoids ever having the binary plaintext keyfile stored on disk anywhere (and indeed not even you need ever see the unencrypted contents). Enter:
+
+livecd ~ #export GPG_TTY=$(tty)
+
+livecd ~ #dd if=/dev/urandom bs=8388607 count=1 | gpg --symmetric --cipher-algo AES256 --output /tmp/efiboot/luks-key.gpg
+
+Enter passphrase
+Passphrase <your new passphrase>
+Please re-enter this passhprase
+Passphrase <your new passphrase again>
+... further output suppressed ...
+
+Note
+We need to set the GPG_TTY variable here, otherwise gpg's pinentry password system may misbehave. If you are connecting over ssh, and your helper system has locale settings not available within the minimal install environment, you may get complaints about no LC_CTYPE known printed by pinentry; these can generally be ignored, and result from sshd on the target machine attempting to use the helper machine's environment.[1]
+
+Note
+We are using the symmetric AES cipher here with a 256 bit key (derived from your passphrase) to protect the keyfile. We'll use a different cipher (Serpent) in LUKS to protect the hard drive partition. Note also that the /tmp/efiboot/luks_key.gpg file will be larger than 8388607 bytes, due to the GPG 'wrapper'.
+
+Warning
+If you lose the (encrypted) keyfile, or forget the passphrase, it's game over for your LUKS data. Therefore, be sure to backup both keyfile and passphrase (to separate, secure locations).
+
+What passphrase you choose to protect your LUKS keyfile is, of course, entirely up to you, but do consider the approach of using a longer list of everyday words, rather than the more traditional cryptic str1ng5 @f characters. Advantages include:[2]
+
+    it's easier to hit a reasonable level of entropy;
+    you are less likely to forget the resulting passphrase; and
+    your passphrase will be more robust in the face of keymapping snafus at boot time.
+
+Creating a New GPT Partition on the PC's Main Drive
+
+Our next task is to create a new GPT partition on the target PC's hard drive (which we freed up space for earlier).
+
+We will use the parted tool, instruct it to use sectors for units, and then display the free space on the current drive. We'll then create a new primary partition on that drive using all the available space indicated.
+
+Warning
+Please take particular care with this step. parted can cause catastrophic data loss if misused and, unlike fdisk, writes changes immediately.
+
+We must first find the device path of the main hard drive on the target machine. We will refer to this as /dev/sdZ in the following text, but it will be something like /dev/sda, /dev/sdb etc. on your machine. Check the actual path with:
+
+If you are dual booting with Windows, you'll probably see that the desired drive has between four and six existing partitions, depending on your version of Windows (note that the initial /dev/ prefix is not shown in the lsblk output). None of these should be mounted (all should have blank mountpoints in the output of lsblk).
+
+Now we will create the partition:
+
+livecd ~ #parted -a optimal /dev/sdZ
+
+GNU Parted 3.1
+... additional output suppressed ...
+(parted) unit s
+(parted) print free
+... additional output suppressed ...
+Number  Start      End         Size        File system  Name                          Flags
+... additional output suppressed ...
+        AAAs       BBBs        CCCs        Free Space
+
+(parted) mkpart primary AAAs BBBs
+(parted) quit
+
+Note
+Replace /dev/sdZ in the above command with the path of the target machine's main drive (the one on which Windows is installed), such as /dev/sda. Note also that we need to target the device itself, and not a partition within it, so for /dev/sdZ in the above command, use e.g. /dev/sda and not /dev/sda1; /dev/sdb and not /dev/sdb1, etc.
+
+Note
+You should of course also substitute for AAA and BBB, whatever output is displayed for the boundaries of the free space when you issue the print free. For example, if you got back
+
+        89362432s  500118158s  410755727s  Free Space
+
+you would issue
+
+(parted) mkpart primary 89362432s 500118158s
+
+You can make the partition smaller, if you do not wish to use all of the remaining space for the Gentoo install. It can be useful to reserve some space (<=1GiB, say) for e.g. an emergency recovery partition, but whether to do so is entirely up to you.
+
+Note
+You may see multiple blocks of free space listed (particularly with modern versions of Windows 10; in this case, just use the largest one.
+
+Note
+The suffix 's' in the dimensions passed above tells parted that you are using 'sector' units. Do not omit it!
+
+Note
+If parted complains that your new partition is not properly aligned for best performance, you may wish to cancel the mkpart, then try again with modified values: rounding the start address up to the nearest 2048, and the end address down to the nearest 2048 sectors. For example, if the largest free block prior to creation of the new partition was reported as
+
+224107278s  469868543s  245761266s  Free Space
+
+you could do the following on your helper PC to calculate optimal values:
+
+user@pc2 $echo "$((((224107278 + 2047) / 2048) * 2048))s $((469868543 - (469868543 % 2048)))s"
+
+224108544s 469866496s
+
+so you would issue:
+
+(parted) mkpart primary 224108544s 469866496s
+
+Obviously, adapt using the sector start and end addresses for the free space block on your drive! Incidentally, the 'magic number' 2048 is a safe choice for most drives; but you can easily calculate the actual optimal value for your own device, if desired.[3]
+
+Note
+If the drive you are using has not yet been partitioned, the print free command will not output data as above. In such a case, you will need to issue a mklabel gpt command within parted first. However, do not do this (i.e., issue mklabel gpt) on an already-partitioned drive; you will lose all the data on there if you do!
+Users who are targeting a fresh disk in this way may also find it easier to create the partition itself with the parted command mkpart primary 0% 100%, as this will deal with all sector alignment issues etc. (Users with existing data on their drives should not do this however, but instead follow the commands given in the main text.)
+
+Note
+Additionally, users who are not co-installing with Windows may find it useful to create two partitions on /dev/sdZ: the main one as specified above, and a second EFI system partition. This will allow e.g. subsequent migration of the kernel from the boot USB key to the main drive later if desired. Users who do intend to dual-boot with Windows should ignore this point: your hard drive already contains an EFI system partition.
+
+Now check that the partition has been created correctly. We'll issue an lsblk command again:
+
+Take note of the new sector device path (note that the initial /dev/ prefix is not shown in the lsblk output). We will refer to this as /dev/sdZn in the below, but it will actually be something like /dev/sda7, /dev/sdb7 etc. If you have a non-standard Windows setup, the number of the new partition may also be something other than 7 (for example, on older Windows 10 and most Windows 8 systems it is more likely to be 5), so do please double check.
+Overwriting the New Partition with Pseudo-Random Data (Optional Step)
+
+You can skip this step if you like. The main reasons to perform an overwrite are:
+
+    to purge any old, unencrypted data that may still be present in the partition (from prior use); and
+    to make it somewhat harder for an attacker to determine how much data is on your drive if the machine is compromised.
+
+However, it may make things slower on a solid-state drive, by forcing any new writes to first delete a sector (once any overcapacity has been exceeded), rather than simply writing to a fresh, unused one (and furthermore, it cannot completely be guaranteed that old data has been wiped, when using such devices).
+
+This command may take a number of hours to complete.
+
+Warning
+The step below will destroy existing data on the partition; please double check to ensure you have the correct device path (e.g., /dev/sda7 etc.) before continuing.
+
+livecd ~ #dd if=/dev/urandom of=/dev/sdZn bs=1M status=progress && sync
+
+Note
+Replace /dev/sdZn in the above command with the device path for the partition we just created, e.g., /dev/sda7.
+
+You will be able to see dd slowly progressing. Wait for it to complete before proceeding to the next step.
+Formatting the New Partition with LUKS
+
+The next step is to format the partition using LUKS. LUKS, which stands for Linux Unified Key Setup, is as the name suggests primarily a way to manage the encryption keys for whole-partition (or drive) encryption. It does this by first generating a high-entropy, secret, master key, which is then encrypted using between one and eight user keys (themselves first pre-processed by PBKDF2).
+
+The target partition itself begins with a LUKS metadata header, followed by the encrypted master key material corresponding to each of the 8 possible user 'slots', and finally the bulk, encrypted (payload) data itself (the encrypted sector data for the partition).
+
+The LUKS master key itself is never stored in unencrypted form on the partition, nor (unless you explicitly request it) even made visible to you, the user.
+
+LUKS uses a cryptographic splitting and chaining technique to artificially inflate the size of the key material for each slot into a number of interdependent 'stripes'. This is done to increase the likelihood that, when a slot is modified (a user key is revoked, or changed, for example), that the old key material is, indeed, irrecoverable (necessary, since under LUKS the partition master key is never changed once created). Be warned though, that with solid-state drives no guarantees can be given, if you change a user key, that the old key material is not retained on the drive somewhere (due to wear-levelling etc.).[4]
+
+LUKS functions are accessed via the cryptsetup program, and use dm-crypt for the back-end processing. Note that LUKS is agnostic as to the actual symmetric encryption method used, provided it is supported by dm-crypt. You can get a list of the (currently loaded) encryption and hash algorithms by issuing:
+
+livecd ~ #cat /proc/crypto
+
+(You may have others available as kernel modules, which will be loaded when required).
+
+What we need to do is tell cryptsetup:
+
+    the underlying block cipher we want to use (block ciphers work on fixed-size units, or blocks, of data to encrypt or decrypt at a time),
+    the key length to use with this cipher,
+    the way we'll tweak it to en/decrypt amounts of data larger than one cipher block (many ciphers use a 16-byte block, and sectors, the indexing unit, are larger than this),
+    what processing, if any, should be applied to the sector index number during IV computation, and
+    the hash algorithm used for key derivation (under the PBKDF2 algorithm within LUKS)
+
+This isn't a cryptography primer (see this article for further reading), but here's a thumbnail justification for the choices made:
+
+    we will use Serpent as the block cipher; this came second in the AES competition mainly for reasons of speed, but has a more conservative design (32 rounds as opposed to 14) and scored a higher safety factor when compared to the Rijndael algorithm that won the competition (and which, accordingly, is now commonly referred to as 'AES');
+    for security, we'll use the longest supported key length for Serpent, which is 256 bits (see the following point, however);
+    we will use XTS mode to both extend the cipher over multiple blocks within a sector, and perform the by-sector-index 'tweaking'; this approach overcomes the security weakness in the more conventional CBC / ESSIV methodology, whereby an attacker, although unable to read the encrypted material, can yet, if they know the cleartext for that sector (possible for some system files), arbitrarily modify alternating blocks to inject shellcode[5]; this is a non-trivial concern for a dual-boot machine where the Windows side of things is untrusted (and has access to the encrypted contents of the LUKS partition when running). Note that since XTS mode actually requires two keys, we must pass an effective key length of 512 (= 2 x 256) bits to cryptsetup;
+    as XTS is a (modified) counter mode, we will simply pass the untransformed ("plain") 64-bit sector index to it (using a 64-bit index will allow for disks > 2TiB);[6]
+    we will use Whirlpool as the user key hashing function for LUKS' PBKDF2 processing; it is a 512 bit hash that has been recommended by the NESSIE project. Note that Whirlpool hash will appear in the output from /proc/crypto as wp512 (if loaded).
+
+We decrypt our keyfile from the USB key (using gpg) and pipe it to cryptsetup, to avoid the unencrypted keyfile having to be saved to disk. The --cipher and --hash strings instruct cryptsetup to use the settings just discussed.
+
+Warning
+The step below will destroy existing data on the partition; please double check to ensure you have the correct device path (e.g., /dev/sda7 etc.) before continuing. When you pipe the keyfile in this way, cryptsetup will not ask you if you are sure prior to formatting.
+
+livecd ~ #gpg --decrypt /tmp/efiboot/luks-key.gpg | cryptsetup --cipher serpent-xts-plain64 --key-size 512 --hash whirlpool --key-file - luksFormat /dev/sdZn
+
+<when prompted, type the passphrase for the gpg keyfile you setup earlier>
+... additional output suppressed ...
+
+Note
+Replace /dev/sdZn in the above command with the device path for the partition we just created, e.g., /dev/sda7.
+Also, you may see some errors of the form device-mapper: remove ioctl on XXX failed: Device or resource busy; these can generally be ignored, provided the luksDump command (described below) works.
+
+Note
+Depending on how soon after first creating the gpg keyfile you issue the above command, you may find that you are not prompted for a passphrase at all. That's because your passphrase has been (temporarily) cached behind the scenes, for convenience, by gpg-agent. If you want to force the passphrase prompt (for example to double-check you have the passphrase written down correctly!), you can do so by issuing the following prior to the luksFormat command above:
+
+livecd ~ #echo RELOADAGENT | gpg-connect-agent
+
+Note
+By default, cryptsetup uses /dev/random as its random number generator (RNG); this may run out of entropy when formatting the partition and print a warning; if this happens, just run your finger over the touchpad of the target machine (or move its mouse, if attached) until the process completes.
+
+Note
+If you use the Whirlpool hash (as we have done), be aware that you will not be able to open the LUKS container using dev-libs/libgcrypt < v1.6.0, because of a bug in those earlier versions when writing data to the Whirlpool hash function in chunks.[7]
+
+Note
+If you'd rather use a vanilla approach, omit the --cipher and --hash arguments; cryptsetup will then revert to its compiled-in defaults (which you can see using)
+
+livecd ~ #cryptsetup --help
+
+At the time of writing, this implies aes-xts-plain64, so Rijndael (AES) rather than Serpent, with a 256bit key (which really means 2 x 128bit keys, given XTS mode, so less secure than our 512bit (= 2 x 256bit) variant), and SHA1 for the LUKS password hashing, which again is arguably less good than Whirlpool. Ultimately, the choice is yours of course.
+
+Note
+Although you can specify an additional hash postfix in the --cipher string (e.g. serpent-xts-plain64:whirlpool rather than simply serpent-xts-plain64), it will be ignored by the kernel in plain64 mode.[8] As such, you should omit it (as we have done). Remember, this postfix is only used to specify the hash function for IV processing (if any), and so is relevant in ESSIV mode, for example. It has nothing to do with the hash used in the LUKS header, which is specified by the --hash argument, as above.
+
+Check that the formatting worked, with:
+
+livecd ~ #cryptsetup luksDump /dev/sdZn
+
+Note
+Replace /dev/sdZn in the above command with the device path for the LUKS partition, e.g., /dev/sda7.
+
+This should print out information about the LUKS setup on the sector, and show that one of the 8 keyslots (slot 0) is now in use (incidentally, pointing out that LUKS does not provide any plausible deniability about the use of encryption! You can detach the header and store it on a separate device, but we won't do that here as it isn't supported in the standard genkernel init scripts that we'll rely on later.).
+
+Important
+the LUKS header gets damaged, your encrypted data will be lost forever, even if you have a backup of the GPG key and passphrase. Therefore, you may wish to consider backing up this header to a separate device, and storing it securely. See the LUKS FAQ for more details on how to do this.
+For example, to save a copy of the current LUKS header to your boot USB key (doing so is optional), you could now issue, per the FAQ:
+
+livecd ~ #cryptsetup luksHeaderBackup /dev/sdZn --header-backup-file /tmp/efiboot/luks-header.img
+
+Replace /dev/sdZn in the above command with the device path for the LUKS partition, e.g., /dev/sda7.
+Be aware that if you do keep a LUKS header backup in this fashion, and subsequently revoke any of the keyslots, that the old keys will still be usable to unlock the LUKS partition, to those with access to that header backup file.
+Adding a Fallback Passphrase (Optional Step)
+
+Since LUKS supports up to 8 user key 'slots', you can, if you wish, add an additional (traditional) passphrase to your LUKS container now. This is not intended for use day-to-day, but simply as a last-resort fallback, should you lose the USB key with the GPG keyfile on it, for example.
+
+Warning
+If you are concerned that your machine might already contain a keylogger, do not perform this step; click here to jump to the next task instead.
+
+Important
+If, at the conclusion of the tutorial, you wish to be able to switch to booting without using the GPG keyfile, then you should setup a fallback passphrase now.
+
+Unfortunately, the necessary cryptsetup command requires that we provide an existing valid user key in addition to the new one we want to add. If we pipe this in directly from gpg (as we did earlier), then cryptsetup will not prompt correctly for a new passphrase. To get around this issue, without writing the existing GPG key out in binary plaintext form to a disk file, we'll use a named pipe.
+
+Assuming you're using screen, hit Ctrla followed by c to start a new virtual console. Then type:
+
+livecd ~ #mkfifo /tmp/gpgpipe
+
+livecd ~ #echo RELOADAGENT | gpg-connect-agent
+
+livecd ~ #gpg --decrypt /tmp/efiboot/luks-key.gpg | cat - >/tmp/gpgpipe
+
+<when prompted, type the passphrase for the gpg keyfile you setup earlier>
+... additional output suppressed ...
+
+(The slightly odd approach of piping via cat is intentional.) This will block once you type in your passphrase, as nothing is connected to the other end our the named pipe (yet). Now switch back to the original virtual console with Ctrla followed by p, and enter:
+
+livecd ~ #cryptsetup --key-file /tmp/gpgpipe luksAddKey /dev/sdZn
+
+Enter new passphrase for key slot: <type your new fallback passphrase>
+Verify passphrase: <type your fallback passphrase again>
+
+Note
+Replace /dev/sdZn in the above command with the device path for the LUKS partition, e.g., /dev/sda7.
+
+Verify that this worked by issuing:
+
+livecd ~ #cryptsetup luksDump /dev/sdZn
+
+Note
+Replace /dev/sdZn in the above command with the device path for the LUKS partition, e.g., /dev/sda7.
+
+You should now see slot 1 is enabled, as well as slot 0. Now, remove the named pipe, since we no longer need it:
+
+livecd ~ #rm -vf /tmp/gpgpipe
+
+Lastly, switch back to the second virtual console with Ctrla followed by n, and then hit Ctrld to close it out and return to the original console again.
+Creating the LVM Structure (PV->VG<-LVs) on Top of LUKS
+
+Our next step is to set up an LVM structure within the LUKS container we just created. LVM stands for Logical Volume Manager: a useful overview may be found here, and a handy command cheatsheet here. It is a highly flexible virtual partition system. Some important LVM terminology is as follows:
+
+    A physical volume (PV) is an underlying storage device (for example, an actual disk partition or loopback file), which is managed by LVM. PVs have a special header, and are divided into physical extents.
+    A physical extent (PE) is the smallest allocatable unit of a PV. We will use the default PE size of 4MiB in this tutorial.
+    A logical volume (LV) is LVM's equivalent of a partition. It contains logical extents, which are mapped one-to-one onto the PEs of contributing physical volumes. Note - unlike a conventional partition, because of this architecture an LV can span multiple underlying physical volumes, and a physical volume can host multiple logical volumes, if desired. The LV appears as a standard block device, and so can be formatted with any normal Linux filesystem (e.g. ext4). We will create LVs for the root directory, the user home directory and swap in this tutorial.
+    A volume group (VG) is an administrative unit gathering together a collection of LVs and PVs. We will create a single VG containing a single PV, and (as just mentioned) three LVs.
+
+The main reason we're using LVM here is to provide a simple way to get three 'logical' partitions on top of a single underlying LUKS container (partition). LVM also provides a number of additional advantages when resizing, backing up, or moving partitions, in exchange for a little initial configuration overhead.[9]
+
+To proceed with LVM, the first thing we need to do is open the LUKS volume we just created, as it will host our single PV. Issue:
+
+livecd ~ #gpg --decrypt /tmp/efiboot/luks-key.gpg | cryptsetup --key-file - luksOpen /dev/sdZn gentoo
+
+Enter passphrase
+<type the passphrase for the gpg keyfile you setup earlier>
+... additional output suppressed ...
+
+Note
+Replace /dev/sdZn in the above command with the device path for the LUKS partition, e.g., /dev/sda7.
+
+Note
+Depending on how soon after last decrypting the gpg keyfile you issue the above command, you may find that you are not prompted for a passphrase at all. That's because your passphrase has been (temporarily) cached behind the scenes, for convenience, by gpg-agent. If you want to force the passphrase prompt (for example to double-check you have the passphrase written down correctly!), you can do so by issuing the following prior to the luksOpen command above:
+
+livecd ~ #echo RELOADAGENT | gpg-connect-agent
+
+Check that this worked:
+
+livecd ~ #ls /dev/mapper
+
+control  gentoo
+
+You should see the device 'gentoo' in the device mapper list, as above. This is our unlocked LUKS partition.
+
+Next, we'll create an LVM physical volume (PV) on this partition:
+
+livecd ~ #pvcreate /dev/mapper/gentoo
+
+Note
+If you see a warning such as:
+
+  /run/lvm/lvmetad.socket: connect failed: No such file or directory
+  WARNING: Failed to connect to lvmetad. Falling back to internal scanning.
+
+when running this or subsequent LVM commands, it may generally safely be ignored.
+
+Then, we create a volume group (VG) hosting this PV. We'll call the new VG "vg1". Note that since we're using lvm2 format here, there's no need to set a larger physical extent size - the default of 4MiB per PE will be fine [10]:
+
+livecd ~ #vgcreate vg1 /dev/mapper/gentoo
+
+Important
+Please use the suggested VG name (vg1), since this is assumed by the buildkernel utility later. If you do need to change it, you'll need to override CMDLINE_REAL_ROOT and CMDLINE_REAL_RESUME variables appropriately in /etc/buildkernel.conf later in the tutorial.
+
+Now, we'll create three logical volumes (LVs) in this volume group. The first is for swap. To allow the use of suspend to disk (which we'll setup later) we'll want a swap slightly larger than the size of our RAM. So first, find the size of RAM on your system with:
+
+livecd ~ #grep MemTotal /proc/meminfo
+
+In the case of the CF-AX3, this shows just under 8GiB, hence we'll allocate 10GiB. Adjust this for your system and preferences. If you don't want to use suspend to disk, a much smaller swap would work just as well.
+
+livecd ~ #lvcreate --size 10G --name swap vg1
+
+Note
+LVM uses base-2 units, so this is 10GiB. Adjust the size to suit your system, as described above.
+
+Note
+If lvcreate complains about not being able to wipe the start of the LV, try adding the -Z n parameter to the previous command. Supposedly it is dangerous to mount an LV whose first few kilobytes haven't been wiped, but then again, you'll be formatting your LV with a filesystem.
+
+Next, we'll create a relatively large LV to hold our root partition. This will eventually hold everything apart from the user home directories, and, since this is Gentoo, we'll need a fair amount of room for portage files and so on. We'll allow 50GiB here - if you wish you can make this smaller or larger of course:
+
+livecd ~ #lvcreate --size 50G --name root vg1
+
+Note
+LVM uses base-2 units, so this is 50GiB. Adjust the size to suit your needs, as described above.
+
+Finally, let's create a third LV to hold the user home directories. We'll instruct LVM to use almost all the remaining space on the LUKS container for this, leaving 5% of the (so far unused space) free (this additional room will come in useful if you want to take a snapshot[11] later, for example).
+
+livecd ~ #lvcreate --extents 95%FREE --name home vg1
+
+You should now be able to look at the status of the physical volume (PV), volume group (VG) and logical volumes (LVs), as follows:
+
+livecd ~ #pvdisplay
+
+livecd ~ #vgdisplay
+
+livecd ~ #lvdisplay
+
+The final task in this step is to 'activate' the new volume group (vg1) so that it's logical volumes become available as block devices via the device mapper. Issue:
+
+livecd ~ #vgchange --available y
+
+This should inform you that three LVs in the vg1 volume group have been activated. Check that they are visible via the device mapper:
+
+livecd ~ #ls /dev/mapper
+
+control  gentoo  vg1-home  vg1-root  vg1-swap
+
+If your output looks similar to the above, then all is well. The new logical volumes (/dev/mapper/vg1-home, /dev/mapper/vg1-root and /dev/mapper/vg1-swap) can be treated exactly like physical disk partitions (i.e., just like /dev/sda1 etc.).
+Formatting and Mounting the LVM Logical Volumes (LVs)
+
+Now we have our virtual partitions, we need to set up their filesystems and then mount them.
+
+First, create the swap:
+
+livecd ~ #mkswap -L "swap" /dev/mapper/vg1-swap
+
+Next, the root filesystem. We'll create this as ext4 (you can of course modify this if you wish):
+
+livecd ~ #mkfs.ext4 -L "root" /dev/mapper/vg1-root
+
+Finally, the user home filesystem, also ext4. Note that we use the -m 0 option here, since ext4 will, by default, reserve 5% of the filesystem for the superuser, and we don't need that in this location, only on the root partition:
+
+livecd ~ #mkfs.ext4 -m 0 -L "home" /dev/mapper/vg1-home
+
+Now, we activate the swap:
+
+livecd ~ #swapon -v /dev/mapper/vg1-swap
+
+And, per the handbook, mount the root directory at the pre-existing /mnt/gentoo mountpoint:
+
+livecd ~ #mount -v -t ext4 /dev/mapper/vg1-root /mnt/gentoo
+
+Next, we create the /mnt/gentoo/home mountpoint, a /mnt/gentoo/boot directory, and a /mnt/gentoo/boot/efi mountpoint. The purpose of these is as follows:
+
+    /mnt/gentoo/home will be the mountpoint for our home directory LV.
+    /mnt/gentoo/boot will be the equivalent of the /boot directory in the Gentoo handbook. We will build our kernel and initramfs targeting this directory as usual, although, since we are booting from an UEFI USB key, this directory will not be used when booting the system itself. Instead, the buildkernel utility, supplied as part of this tutorial, will be used to copy the final, signed and bootable kernel image onto the USB key (at /mnt/gentoo/efiboot) as part of the kernel build process. For that reason, we've converted /mnt/gentoo/boot from a mountpoint to a regular directory in this tutorial.
+    /mnt/gentoo/boot/efi will be the mountpoint for our USB boot key when inserted in the machine (when installing a new kernel, etc.). We currently have the key mounted at /tmp/efiboot and will need to unmount it.
+
+Create the directories:
+
+livecd ~ #mkdir -v /mnt/gentoo/{home,boot,boot/efi}
+
+Now mount the "home" LVM logical volume from the "vg1" volume group on the /mnt/gentoo/home mountpoint:
+
+livecd ~ #mount -v -t ext4 /dev/mapper/vg1-home /mnt/gentoo/home
+
+Next, we need to unmount the USB boot key's EFI partition from its current temporary mountpoint (we'll remount it later, when we build the kernel):
+
+livecd ~ #umount -v /tmp/efiboot
+
+Finally, issue:
+
+livecd ~ #blkid /dev/sdY1 /dev/sdZn
+
+Note
+Replace /dev/sdY1 in the above with the actual path of your USB boot key's first partition, which we found earlier (e.g., /dev/sdc1 etc.), and /dev/sdZn with the actual device path for the LUKS partition (e.g., /dev/sda7 etc.).
+
+Take note of the PARTUUIDs (unique partition identifiers) for these two partitions; we'll make use of them later (in the fstab and the kernel build script's configuration file), rather than relying on the /dev/sd?? paths (which can change depending on which devices are plugged in, and the order in which they are recognized).
+Next Steps
+
+We're now ready to fetch the additional installation files and setup the build options. Click here to go to the next chapter, "Installing the Gentoo Stage 3 Files".
+Notes
+
+    ↑ ServerFault Q&A Site: "Setting locale failed: force certain locale when connecting through ssh"
+    ↑ Information Security Stack Exchange: "XKCD #936: Short complex password, or long dictionary passphrase?"
+    ↑ Rainbow Chard Blog: How to align partitions for best performance using parted
+    ↑ cryptsetup: "Frequently Asked Questions"; section 5.19/
+    ↑ Lell, Jakob. "Practical malleability attack against CBC-encrypted LUKS partitions"
+    ↑ dm-crypt Mailing List: "Using plain64/plain IV (initialisation vector) in dm-crypt"
+    ↑ dm-crypt Mailing List: "Whirlpool in gcrypt <= 1.5.3 broken (if writes in chunks)?"
+    ↑ dm-crypt Mailing List: "Re: Non-standard cipher mode"
+    ↑ Arch Linux Wiki: "LVM: Advantages"
+    ↑ Fedora Forum: "LVM PE size - is it important?"
+    ↑ Arch Linux Wiki: "Create root filesystem snapshots with LVM"
+
+## Gentoo, Portage, Ebuilds and emerge (Background Reading)
+
+Gentoo is a source-based distribution, the heart of which is a powerful package manager called Portage. Portage itself has two main components:
+
+    the ebuild system, which performs the actual work of fetching, configuring, building and installing packages, and
+    the emerge tool, which provides a command line interface to invoke ebuilds, and also allows you to update the Portage tree (discussed below), resolve package dependencies, and other related tasks.
+
+
+| | |
+|-|-|
+|`NOTE` |	If you're new to all of this, a useful introduction to Portage may be found in Chapter 1 of Part 2 of the Gentoo Handbook, and in this Wikipedia article. However, don't worry - you don't need to be an adept programmer to use Gentoo on a day-to-day basis! (In fact, if you'd like to skip over this background material now and continue with the next section of the install, just click here).|
+55
+
+| | |
+|-|-|
+|`NOTE` |		If you're new to all of this, a useful introduction to Portage may be found in Chapter 1 of Part 2 of the Gentoo Handbook, and in this Wikipedia article. However, don't worry - you don't need to be an adept programmer to use Gentoo on a day-to-day basis! (In fact, if you'd like to skip over this background material now and continue with the next section of the install, just click here).|
+
+
+Package ebuilds are Bash shell scripts, or more accurately shell script fragments, that are sourced into a larger build system 'host' script. This host script provides a package management control flow that invokes a set of default 'hook' functions, which a particular package's ebuild may override if it needs to (these are covered in detail in the Gentoo Development Guide). The ebuild also must define a minimum set of variables to allow the whole process to operate successfully (for example, the URI from where a package's source tarball may be downloaded must be assigned to the SRC_URI variable).
+
+Now, when you invoke an ebuild to install a particular (as yet uninstalled) package on your system (via emerge, for example, as described below), it will typically carry out the following tasks (inter alia):
+
+    check that the specified package can be installed (that is, that it isn't masked, or has an incompatible license requirement);
+    download the package's tarball (or other format source archive) from an upstream repository (or Gentoo mirror);
+    unpack the tarball in a temporary working area;
+    patch (and otherwise modify) the unpacked source if need be;
+    configure the source to prepare it for compilation on your machine;
+    compile / build the source, as a non-privileged user in the temporary work area;
+    run tests (if provided and required);
+    install the built package to a dummy filesystem root; and
+    copy ('merge') the package installation files from the dummy filesystem root to the real filesystem root (keeping a record of what gets done).
+
+Up until the final file copy-over step (the 'merge' in emerge), all operations (even where the package's make install is invoked, for example) take place in a temporary staging area. This enables Portage to keep track of all the files installed by a particular package, limit the damage caused by failed compiles or installs, and facilitate simple removal of installed packages. Furthermore, for most of these tasks, Portage operates in a 'sandbox' mode, where attempts to write directly to the real root filesystem (rather than the temporary work area) are detected, and cause an error to be thrown (NB this is not intended as a security system per se, but it does help prevent accidental filesystem corruption).
+Note
+Portage will attempt to deal with build and runtime dependencies when emerging packages, and will automatically install such dependencies for you, by invoking their ebuilds.
+Note
+At this stage in the install, you won't be able to see the files referred to in the text below on your target PC, since the minimal install image has an empty /var/db/repos/gentoo directory, and the system we in the process of creating from the stage 3 tarball (whose root is currently at /mnt/gentoo) has no /var/db/repos/gentoo directory yet. This will be rectified in the next chapter.
+
+Portage stores ebuilds in a hierarchical folder structure - the Portage tree (or repository), which by default is located under /var/db/repos/gentoo. The first tree level is the package category, which is used to organize packages into groups which have broadly similar functionality. So, for example, non-core development utilities are typically placed in the dev-util category (in folder/var/db/repos/gentoo/dev-util). The next tree level is the package name itself. To take a concrete example, the small utility diffstat (which, as its name suggests, displays a histogram of changes implied by a patch file, or other diff output), is located in the folder /var/db/repos/gentoo/dev-util/diffstat. Within that subdirectory we have the actual per-package content, specifically:
+
+    The ebuild files. Each supported version has a file of format <name>-<version>.ebuild. At the time of writing, there are two supported versions (1.60 and 1.61) of diffstat in the Portage tree, so the ebuilds are located at /var/db/repos/gentoo/dev-util/diffstat/diffstat-1.60.ebuild and /var/db/repos/gentoo/dev-util/diffstat/diffstat-1.61.ebuild. Portage supports a complex version numbering taxonomy which, for the most part, reflects upstream versioning (discussed further below), and most packages, like diffstat, will have multiple ebuild versions available at any given time.
+    Package metadata. This is stored in an xml-format text file (one per package), named metadata.xml. Its contents are described here, and can contain detailed package descriptions, email addresses for upstream maintainers, documentation about USE flags etc. diffstat's metadata file is at /var/db/repos/gentoo/dev-util/diffstat/metadata.xml.
+    A manifest file, which contains digests (BLAKE2B and SHA512) and file sizes for the contents of the package directory and any referenced tarballs (and patches, if present). It is used to detect corruption and possible tampering during package download / installation. This manifest, which may optionally be digitally signed, is stored in the Manifest file; diffstat's therefore resides at /var/db/repos/gentoo/dev-util/diffstat/Manifest.
+    An optional files directory. This is used to hold patches and other small files that are supplementary to the main source tarball but referenced by one or more of the package's ebuilds. The directory may be absent if unused. As (at the time of writing) diffstat does not require patches, it has no files subdirectory either.
+
+Note
+Since the Portage tree, or repository, is nothing other than a set of files, it can easily be kept up to date with Gentoo's mirrored 'master copy' (and indeed by default this is done using rsync, whenever you issue an emerge --sync, for example).
+A Simple ebuild (diffstat)
+
+So what does an ebuild file actually look like, then? diffstat happens to be a good minimal example; here (at the time of writing) is what /var/db/repos/gentoo/dev-util/diffstat/diffstat-1.61.ebuild contains:
+FILE /var/db/repos/gentoo/dev-util/diffstat/diffstat-1.61.ebuildA fairly minimal ebuild, relying on the default 'hook' functions and control flow
+
+# Copyright 1999-2016 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+
+EAPI=6
+
+DESCRIPTION="Display a histogram of diff changes"
+HOMEPAGE="http://invisible-island.net/diffstat/"
+SRC_URI="ftp://invisible-island.net/diffstat/${P}.tgz"
+
+LICENSE="HPND"
+SLOT="0"
+KEYWORDS="~alpha ~amd64 ~arm ~arm64 ~hppa ~ia64 ~mips ~ppc ~ppc64 ~s390 ~sh ~sparc ~x86 ~x86-fbsd ~amd64-linux ~x86-linux ~ppc-macos ~x86-macos ~sparc-solaris ~x86-solaris"
+IUSE=""
+
+Not a lot to see, is there? That's because diffstat uses a standard 'Autotools'-style build, without patches, so the default ebuild control flow (and invoked 'hook' functions) can do almost everything for us. Therefore, all that has to be done is:
+
+    to specify (via the EAPI variable) that the ebuild makes use of the most modern package manager functionality, including built-in default behaviours (version 6, at the time of writing).
+    to specify a brief DESCRIPTION, HOMEPAGE (both self-explanatory) and most importantly, SRC_URI; this last variable tells Portage the location from whence to download the package tarball, if it cannot find it in the Portage mirrors (the ${P} expands out to be the package name and version; a handy list of these special variables may be found here);
+    to specify the LICENSE (the relevant text may be found at /usr/src/portage/licenses/${LICENSE});
+    to specify that SLOTTING is not used by this ebuild (this is an advanced feature; see below for a brief overview); and
+    finally to list the architectures (KEYWORDS) for which this ebuild applies. Here, we can see that (at the time of writing) it is in testing (has a tilde) for all the architectures listed (alpha, amd64 etc.).
+
+Note
+At the time of writing, diffstat had no USE flags, hence IUSE="".
+
+That's all that is needed in this case, because the default ebuild functions will automatically pull down the tarball, unpack it, issue a ./configure, issue a make, followed by a make install (to a dummy root), after which, the program file (plus manpage etc.) will be copied over ('merged') to the real filesystem (and any prior version's files safely unmerged immediately thereafter).
+Note
+In fact, the default ebuild flow will handle not just 'Autotools' packages, but also any package provided with a Makefile that can accept make and make install invocations, and respects the DESTDIR variable. By default, the ./configure step will be omitted if no configure file is found in the top-level source directory of the tarball after unpacking.
+
+There are then two main ways to invoke the diffstat ebuild. The first (and more common way) is via emerge: typically, you would issue:
+root #emerge --ask --verbose dev-util/diffstat
+Note
+This is just an example, this command is not part of the installation tutorial and you should not actually issue it at this point.
+Note
+It is also possible to tell emerge which specific version you want, for example, you could issue instead:
+root #emerge --ask --verbose =dev-util/diffstat-1.60
+
+This is an example of a qualified version atom, discussed below.
+
+On the other side of the coin, it is possible to leave off the category qualifier when using emerge, but that's not recommended due to occasional ambiguities, where the same name occurs in multiple categories.
+
+The second (lower level) way is invoke the ebuild directly; for example, you could issue:
+root #cd /var/db/repos/gentoo/dev-util/diffstat/
+root #ebuild diffstat-1.60.ebuild clean merge
+Note
+This is also just an example, these commands are not part of the installation tutorial and you should not actually issue them at this point.
+
+which will clean Portage's temporary build directories, and then perform all the steps of the ebuild workflow, providing detailed output as it does so (you can also use the ebuild command to perform only certain steps, if you wish, and it can also create Manifest files; see the ebuild manpage for details).
+Note
+Unlike the emerge invocation, this will not add dev-util/diffstat to the @world set (see below for an explanation of what this means).
+A More Complex ebuild (sign)
+
+The diffstat example above is about as simple as a real-world ebuild gets!
+
+However, one common additional requirement is the need to apply patches. To do this, an ebuild will typically override the default src_prepare ebuild 'hook' function (invoked by the standard ebuild flow after the source tarball has been successfully unpacked), and in the overridden version use the epatch utility function to apply patches held in the files directory.
+Note
+However, from EAPI 6 the default src_prepare function is no-longer a no-op, it will automatically apply any patches listed in the PATCHES array variable (and call eapply_user, to apply user patches)[2]. The ebuild we're about to look at however uses EAPI 5, so has to apply its required patches using epatch directly.
+
+For example, consider the sign package, which provides a file signing and signature verification utility. It lives in the app-crypt category. Looking in its corresponding directory (/var/db/repos/gentoo/app-crypt/sign) we notice immediately that unlike diffstat, there is a files subdirectory, containing two patches (1.0.7-as-needed.patch and 1.0.7-openssl-0.9.8.patch).
+
+Let's examine version 1.0.7 of the ebuild:
+FILE /var/db/repos/gentoo/app-crypt/sign/sign-1.0.7.ebuildA slightly more complex ebuild, illustrating patching and conditional dependencies
+
+# Copyright 1999-2017 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+
+EAPI=5
+
+inherit toolchain-funcs eutils
+
+DESCRIPTION="File signing and signature verification utility"
+HOMEPAGE="http://swapped.cc/sign/"
+SRC_URI="http://swapped.cc/${PN}/files/${P}.tar.gz"
+
+LICENSE="BZIP2"
+SLOT="0"
+KEYWORDS="amd64 ppc x86 ~amd64-linux ~x86-linux ~ppc-macos"
+IUSE="libressl"
+
+RDEPEND="
+	!libressl? ( dev-libs/openssl:0= )
+	libressl? ( dev-libs/libressl:0= )"
+DEPEND="${RDEPEND}"
+
+src_prepare() {
+	epatch "${FILESDIR}"/${PV}-openssl-0.9.8.patch
+	epatch "${FILESDIR}"/${PV}-as-needed.patch
+	# remove -g from CFLAGS, it happens to break the build on ppc-macos
+	sed -i -e 's/-g//' src/Makefile || die
+}
+
+src_compile() {
+	emake CC="$(tc-getCC)"
+}
+
+src_install() {
+	dobin ${PN}
+	doman man/${PN}.1
+	dodoc README
+	dosym ${PN} /usr/bin/un${PN}
+}
+
+Most of this should be familiar enough from the diffstat example, but there are some new elements too. Specifically:
+
+    the inherit command is used to pull in two useful 'eclasses': eutils (which supplies the epatch function discussed shortly) and toolchain-funcs (which supplies tc-getCC, a function to return the name of the toolchain C compiler);
+    the SRC_URI makes use of the ${PN} variable, which expands out to the package name, without version (a full list of these convenience variables may be found here);
+    the IUSE definition is not blank: there is one optional USE flag here, libressl (which switches to that SSL library, as we shall discuss next; see below for a brief introduction to USE flags);
+    the RDEPEND variable specifies a set of runtime dependencies, and the DEPEND a set of build/install time dependencies, for the package. This is used by Portage to ensure that all prerequisites are also installed, when you ask to emerge app-crypt/sign. Notice that this build pulls in dev-libs/openssl by default, unless the libressl USE flag is specified, in which case dev-libs/libressl is pulled in instead;
+    the src_prepare 'hook' function (which by default is a no-op at EAPI 5) is overridden to perform two custom tasks:
+        to patch the source using the epatch utility, using patch files /var/db/repos/gentoo/app-crypt/sign/files/1.0.7-openssl-0.9.8.patch and /var/db/repos/gentoo/app-crypt/sign/files/1.0.7-as-needed.patch (${PV} expands to the package version, without name or revision tags). As described here, epatch intelligently attempts to apply patches using different -p levels etc.
+        to invoke a small sed script to modify the Makefile slightly.
+    the src_compile 'hook' function (which by default will simply invoke emake after some pre-preprocessing) is overridden to ensure that the C compiler is set correctly (the upstream Makefile not supporting environment-set CC values in this case);
+    the src_install 'hook' function (which by default will invoke emake DESTDIR="${D}" install and then further install any documentation specified via the DOCS array variable) is overridden to perform a manual install using some helper install functions; this is sometimes necessary if the upstream Makefile does not support the use of DESTDIR, or does not support the install target.
+
+Note
+Of course, ebuilds can be much more complex than either of the above two examples, but they should give you a basic idea of how the system works. For more details, I'd refer you to the Gentoo Development Guide "Ebuild Writing" section.
+Ebuild Repositories (aka Overlays)
+
+What if you want to modify an ebuild yourself, or add a new one? You could of course submit the ebuild to Gentoo using Bugzilla, but that only really applies to completed work you want to share. For work in progress, or private ebuilds, a different approach is required. You can't simply insert new entries into the /var/db/repos/gentoo tree, as they'll get overwritten next time you synchronize the Gentoo repository.
+
+Instead, Portage supports the concept of ebuild repositories (historically known as "overlays") to address just this issue. These are simply additional collections of ebuilds and associated metadata, laid out in a similar filestructure to the main Portage tree, which Portage (by default, and as the historical name suggests) 'overlays' on the /var/db/repos/gentoo file structure. To illustrate, suppose you created a directory at, say, /tmp/myrepo, created the subfolders /tmp/myrepo/dev-util and /tmp/myrepo/dev-util/diffstat, then created an ebuild /tmp/myrepo/dev-util/diffstat/diffstat-1.60.ebuild (and manifest, /tmp/myrepo/dev-util/diffstat/Manifest), and then created the following (in /etc/portage/repos.conf/myrepo.conf, to inform Portage's plug-in sync system of its presence):
+FILE /etc/portage/repos.conf/myrepo.confExample ebuild repository configuration file
+
+[myrepo]
+# Simple example 'overlaid' ebuild repository
+location = /tmp/myrepo
+priority = 100
+auto-sync = no
+
+Then, when referring to (or installing) diffstat, Portage would use your version, rather than the 'official' ebuild (however, if you had created an ebuild with a lower version number, say 1.57, then by default Portage would still use the higher numbered version, from the official /var/db/repos/gentoo 'underlay').
+Note
+There are actually a few more files you'd need to create in your overlay to make it functional (and you probably want to place it under source control, and not host the local copy under /tmp in any event!). See these instructions for further details.
+
+We'll exploit this ability shortly, when we add the sakaki-tools ebuild repository (which will contain a number of useful tools used in this installation walk-through).
+Portage's Configuration Files
+
+Portage provides you, the user, with a great deal of flexibility. As such, it has many configuration options, specified via a set of files held in the /etc/portage directory (and subdirectories thereof). As our installation process is going to involve using Portage (via the command-line tool emerge) to download, then build and install up-to-date versions of all core system software, we first need to set up these configuration files appropriately.
+
+The most important Portage configuration files you'll need to know about now are as follows (this is not complete - see this list for more information, and also the Portage manpage[3]):
+Important
+It is possible to have any of the below as subdirectories, rather than files, in which case the contents of the subdirectory will be parsed in alphabetical order.[4] Indeed, the subdirectory-based approach has now become the default on the Gentoo installation media (with the exception of /etc/portage/make.conf), so please bear that in mind when reading the table.
+File in /etc/portage/ 	File Description
+repos.conf 	Specifies site-specific repository configuration, including the mechanism and URI via which repositories should be synchronized.
+make.conf 	Contains definitions of various important variables used by Portage. These variables tell the system, amongst other things:
+
+    the default licensing to accept (for example, accept only free software),
+    the system architecture to target (for example, the 'amd64' architecture - actually a generic reference to 64-bit processors, whether from AMD or Intel - used here),
+    some information about the system video card and input devices
+    whether to build the 'stable' versions of packages, or the latest, 'testing' version (happily, Gnome3 is present in the 'stable' branch of Gentoo, so we can use this);
+    the default system-wide USE flags (USE flags are Portage 'meta-instructions' to control the build process for packages; they are a core Portage concept and introduced in Chapter 2 of Part 2 of the Gentoo Handbook);
+    what URLs to use when syncing the Portage tree (and many source tarballs) (we'll want to point to local mirrors, to keep things fast),
+    what logging to perform during builds (we'll switch this on, since its very useful when things go wrong)
+    and many others.
+
+To ease the problem of setting things up correctly for your particular use case (e.g., a headless server, or, as in our case, a GNOME desktop with systemd or OpenRC), Portage makes use of profiles. A profile specifies (inter alia) a set of default values for most of the variables in /etc/portage/make.conf, which will be used if the appropriate variable is not defined in the user's environment (checked first) or in the /etc/portage/make.conf file. (NB - so-called incremental variables, such as the one which holds the list of USE flags, are an exception to this masking approach, as they 'cascade' additively, from profile, through /etc/portage/make.conf, to the user's environment.)
+
+It is also possible to specify overrides for certain elements of Portage's operation on a per-package basis, through the use of the following configuration files:
+package.mask 	Versions of packages specified in package.mask are 'masked' - that is, blocked from installation (think of it as an installation blacklist). This is most commonly used to prevent Portage updating a package when there is some bug or incompatibility with the new release. It is also sometimes used to mask out everything in a large third-party ebuild repository, for security (with only the specific packages that are wanted then being allowed, by explicit citation in the package.unmask file (discussed next).
+package.unmask 	This file overrides package.mask (think of it as an installation whitelist). It is sometimes used to allow 'activate' specific packages only from a large ebuild repository (which has been otherwise totally masked via package.mask, above).
+package.use 	package.use contains a list of USE flags for individual packages. It comes in handy when specifying flags that have only localized meaning (e.g., suppressing the installation of Guest Additions in VirtualBox), or which you only want to turn on in very selective situations (such as the test flag, for example). You can also turn off USE flags for particular packages, by prefixing them with a minus sign ('-').
+package.license 	The package.license file allows you to specify allowed licenses on a per-package basis. It's generally used where you have a restrictive licensing default (such as 'free software only', as we are going to set), but need to add some exceptions for a few cases.
+package.accept_keywords 	The package.accept_keywords file primarily allows you to specify packages which should use the testing, rather than stable, software branch. It is best to keep the use of this to a minimum, to avoid dependency pollution, but it is sometimes necessary (for example, when using software for which no stabilized version yet exists in the tree).
+Note
+There are other things you can do with package.accept_keywords too, such as activating so-called 'live' (aka '9999') ebuilds, which track the tip of a branch in a version control system directly, but we will not utilise this in our tutorial.
+env 	The env directory contains custom environment files that can be used to override default emerge behaviour, when cited for a given package in package.use (see below). For example, you could create a file called /etc/portage/env/no_build_parallelism.conf, and put in it MAKEOPTS="-j1". Then, you could apply this custom environment setting to any package that had a problem with this issue, as described next.
+package.env 	The package.env file allows you to apply custom environment settings (as defined in /etc/portage/env/..., see above) to particular packages. For example, you could turn off build parallelism for a package by citing no_build_parallelism.conf against it, here.
+Atoms, Packages, Categories, Versions, Sets and SLOTs
+
+Finally for this background overview, there are a few Portage package management terms that are worth a brief recap:
+
+    As mentioned, a package refers to a homogeneous block of software which has a single provided ebuild per installable version, whether third-party (e.g., openvpn) or internal to Gentoo itself (e.g., gentoolkit).
+    Packages are grouped (as leaves of a tree) into categories, which describe broad classes of functionality. For example, openvpn is in the net-vpn category (along with other similar tools like tor and strongswan); gentoolkit is in the app-portage category (along with other Portage applications, like mirrorselect and elogviewer).
+    A package base atom simply refers to the name made up of the full category, followed by the package, without version information or other qualifiers. So for example net-misc/openvpn, app-portage/gentoolkit etc. You can find all the ebuilds in the currently sync'd tree for a given <category>/<packagename> base atom in the directory /var/db/repos/gentoo/<category>/<packagename> (so, for example, /var/db/repos/gentoo/dev-util/diffstat/), and find more information about that base atom online at https://packages.gentoo.org/package/<category>/<packagename> (so, for example, https://packages.gentoo.org/package/app-portage/gentoolkit). While it is often possible to drop the category name and simply use the package itself, it's generally safer to use the base atom, since two different packages of the same name may exist in different categories (e.g. axiom could refer to either dev-python/axiom, an object database over SQLite, or sci-mathematics/axiom, a computer algebra system).
+    It is generally possible to specify that a specific repository should be used to supply a package, by appending ::<reponame> to its atom. For example, emerge --ask --verbose dev-util/diffstat::myrepo would force Portage to install the diffstat package from the myrepo repository (and would fail if either that overlay was unknown, or if the dev-util/diffstat package was not present in it).
+    Any given package will normally be supported at multiple versions within Portage (one ebuild per version). Not all versions from the upstream tree may be present as ebuilds, only certain selected versions. The online package data referred to above will show what versions are available, on which architectures, and which are marked as 'stable', which are 'testing' (shown with a tilde ('~')), and which are masked (will not be installed by Portage, generally due to known problems or with the ebuild, or incompatibilities with other packages). You can fully qualify an atom by specifying its version as a suffix - generally, you take the base atom, then add a hyphen ('-'), then add a period-separated list of numbers (possibly finishing with a letter, and/or a revision suffix). So, for example, version 2.4.3 of openvpn would be written as net-vpn/openvpn-2.4.3; version 1.19.1 (r1) of wget as net-misc/wget-1.19.1-r1. Revisions are Gentoo ebuild specific, they do not relate to upstream versioning (one implication of which being, that different revisions of a particular version of a package will generally use the same upstream source tarball (although they may of course apply different patch sets etc.)).
+    When specifying atoms to Portage in certain places (such as configuration files, like /etc/portage/package.use), you can either specify base atoms (meaning apply the action to all ebuild versions), or a qualified version atom. You can qualify a versioned atom with:
+        A prefix ('>', '>=', '=', '<=', '<'], to restrict the action to particular versions relative to the stated variant (for example, if you appended ">=net-vpn/openvpn-2.4.3 inotify" to /etc/portage/package.use, you'd be telling Portage to apply the inotify use flag to any version of openvpn at or above 2.4.3.
+        A extended prefix: there are a number of these but the most important is '~', which is used to specify any revision of the base version specified. So, for example, ~app-portage/gentoolkit-0.3.3 would refer to app-portage/gentoolkit-0.3.3, app-portage/gentoolkit-0.3.3-r1, app-portage/gentoolkit-0.3.3-r2 etc. (where they exist, of course!)
+        A wildcard suffix ('*'). This can be used to match any version with the same string prefix. So for example, net-vpn/openvpn-2.4* would match (at the time of writing) net-vpn/openvpn-2.4.2-r1, net-vpn/openvpn-2.4.3, net-misc/openvpn-2.4.3-r1 etc.
+
+For more information on atom naming, see the ebuild (5) manpage.[5]
+
+    A number of atoms may be grouped together into a set, so that operations (e.g. reinstallation) can be easily targeted at the whole group. Sets are special names and are prefixed by '@': some of these are pre-defined in Portage (for example, the @system set (containing vital system software packages, the contents of the stage 3 tarball plus other component dictated by your profile), or the dynamically populated @preserved-rebuild set (which holds a list of packages using libraries whose sonames have changed (during an upgrade or downgrade) but whose rebuild has not been triggered automatically). The @world set refers to all packages you explicitly requested be installed, and is contained in a file /var/lib/portage/world (note however that operations on the @world set will include the @system set, by default, not just what is in the /var/lib/portage/world file). You can even define your own sets if you like.
+    Portage also allows (subject to certain limitations) different versions of the same package to exist on a machine at the same time: we speak of them being installed in different SLOTs. We won't need to refer to the SLOT technology explicitly in this tutorial, but should you see a versioned atom with a colon ':' followed by some numbers and possibly other characters at the end, that's a SLOT reference. For example, with the x11-libs/gtk+ library, it is possible (at the time of writing) to have version 2.24.31-r1 and 3.22.15 installed in parallel, should you desire it (in SLOTs 2 and 3).[6] You might then see a reference to x11-libs/gtk+:3, which would refer to any version of gtk+ in SLOT 3 (which would, for example, cover version 3.22.16 as well).
+
+That's about it for this sidebar on atoms and versioning, apart from one last point: unlike other Linux distributions, you'll see no reference to 'releases' of Gentoo itself - there's nothing similar to Ubuntu's "Xenial Xerus" or "Artful Aardvark", Debian's "Stretch" or "Buster", Fedora's "Heisenbug" or "v26" etc. That's because, once installed, Gentoo itself is essentially versionless - when you update your system (more on which later), all installed software updates to the latest supported versions (subject to restrictions imposed by the Gentoo developers and you yourself, through settings in /etc/portage/make.conf, /etc/portage/package.mask etc.).
+
+The upside of this is that you can get access to the latest and (often) greatest versions of software as soon as new ebuilds get released into the tree. The downside is that (particularly on the 'testing' (rather than the 'stable') branch), sometimes updates fail to complete successfully, an occurrence that is very rare indeed when using binary distributed, release-based distributions such as Ubuntu.
+
+Time to get back to the install!
+Configuring /etc/portage/make.conf
+
+Our first Portage configuration task is to ensure that the download / unpack / prepare / configure / compile / install / merge cycle (aka 'emerging') - which you'll see rather a lot of when running Gentoo - is as efficient as possible. That primarily means taking advantage of whatever parallelism your system can offer.
+Important
+Remember that we have not yet performed a chroot. As such, our vestigial system is still mounted at /mnt/gentoo. Therefore, our new system configuration files are at /mnt/gentoo/etc/portage, not /etc/portage, and so on. Confusingly, since the minimal install system is also a Gentoo system, there actually is a /etc/portage directory, but the files in there are not the ones you need to edit. Make sure you don't get mixed up! In what follows, if you are instructed to edit a file, its full path (including mountpoint prefix) will always be given, to avoid any ambiguity.
+
+There are two main dimensions to this - the maximum number of concurrent Portage jobs that will be run at any one time, and the maximum number of parallel threads executed by the make process invoked by each ebuild itself.
+
+As has been recommended, we'll set our number of concurrent jobs and parallel make threads to attempt, to be equal to the number of CPUs on the system, plus one.[7] We'll also prevent new jobs or compilations starting when the system load average hits or exceeds the number of CPUs.
+
+The two variables we'll need to set here are EMERGE_DEFAULT_OPTS (for Portage job control) and MAKEOPTS (to pass options on to make). These are often defined in the make.conf file, but we want to allow the values to be set programmatically. Since Portage doesn't support fancy bash features like command substitution,[8] we'll set and export these variables in root's .bashrc instead (these will then override any conflicting values in the make.conf or profile, as explained earlier).
+Note
+Generally speaking, emerge is launched as the root user (superuser) in Gentoo. emerge usually drops its privilege level to run as the "portage" user when compiling.
+
+Start up your favourite editor: in this tutorial we'll be assuming nano:
+livecd ~ #nano -w /mnt/gentoo/root/.bashrc
+Note
+The -w option tells the nano editor not to auto-wrap long lines (auto-wrapping can really mess up config files!).
+
+nano is a pretty simple editor to use: move around using the arrow keys, type to edit as you would in any text processing program, and exit with Ctrlx when done: you'll be prompted whether to save changes if you have modified the file. At this point, enter y and Enter to exit, saving changes, or n to exit without making changes. For some more information on the nano editor, see this Wiki entry.
+
+Add the following text to the file:
+FILE /mnt/gentoo/root/.bashrcSetting up MAKEOPTS and EMERGE_DEFAULT_OPTS
+
+export NUMCPUS=$(nproc)
+export NUMCPUSPLUSONE=$(( NUMCPUS + 1 ))
+export MAKEOPTS="-j${NUMCPUSPLUSONE} -l${NUMCPUS}"
+export EMERGE_DEFAULT_OPTS="--jobs=${NUMCPUSPLUSONE} --load-average=${NUMCPUS}"
+
+Save and exit the nano editor.
+Note
+Should you experience problems with parallel make, and wish to fall back to a more conservative setting, you can do so globally by setting MAKEOPTS="-j1" in the above.
+
+Next, we need to make sure that the .bashrc file is picked up by root's login shell, so copy across the default .bash_profile:
+livecd ~ #cp -v /mnt/gentoo/etc/skel/.bash_profile /mnt/gentoo/root/
+
+Next, on to the make.conf configuration file itself. The stage 3 tarball we extracted already contains a skeleton configuration. We'll open this file with nano (feel free to substitute your favourite alternative editor), delete the existing lines (in nano, Ctrlk can be used to quickly cut the current line), and enter our alternative configuration instead (see after for a line-by-line explanation). Issue:
+livecd ~ #nano -w /mnt/gentoo/etc/portage/make.conf
+
+Edit the file so it reads:
+FILE /mnt/gentoo/etc/portage/make.confSetting up essential Portage variables
+
+# Build setup as of <add current date>
+
+# C, C++ and FORTRAN options for GCC.
+COMMON_FLAGS="-march=native -O2 -pipe"
+CFLAGS="${COMMON_FLAGS}"
+CXXFLAGS="${COMMON_FLAGS}"
+FCFLAGS="${COMMON_FLAGS}"
+FFLAGS="${COMMON_FLAGS}"
+
+# Note: MAKEOPTS and EMERGE_DEFAULT_OPTS are set in .bashrc
+
+# The following licence is required, in addition to @FREE, for GNOME.
+ACCEPT_LICENSE="CC-Sampling-Plus-1.0"
+
+# WARNING: Changing your CHOST is not something that should be done lightly.
+# Please consult http://www.gentoo.org/doc/en/change-chost.xml before changing.
+CHOST="x86_64-pc-linux-gnu"
+
+# Use the 'stable' branch - 'testing' no longer required for Gnome 3.
+# NB, amd64 is correct for both Intel and AMD 64-bit CPUs
+ACCEPT_KEYWORDS="amd64"
+
+# Additional USE flags supplementary to those specified by the current profile.
+USE=""
+CPU_FLAGS_X86="mmx mmxext sse sse2"
+
+# Important Portage directories.
+PORTDIR="/var/db/repos/gentoo"
+DISTDIR="/var/cache/distfiles"
+PKGDIR="/var/cache/binpkgs"
+
+# This sets the language of build output to English.
+# Please keep this setting intact when reporting bugs.
+LC_MESSAGES=C
+
+# Turn on logging - see http://gentoo-en.vfose.ru/wiki/Gentoo_maintenance.
+PORTAGE_ELOG_CLASSES="info warn error log qa"
+# Echo messages after emerge, also save to /var/log/portage/elog
+PORTAGE_ELOG_SYSTEM="echo save"
+
+# Ensure elogs saved in category subdirectories.
+# Build binary packages as a byproduct of each emerge, a useful backup.
+FEATURES="split-elog buildpkg"
+
+# Settings for X11
+VIDEO_CARDS="intel i965"
+INPUT_DEVICES="libinput"
+
+Note
+Set VIDEO_CARDS and INPUT_DEVICES to appropriate values for your particular system in /etc/portage/make.conf. See table below for discussion.
+Important
+As discussed below, ensure that you only specify CPU_FLAGS_X86 flags that your CPU supports, otherwise compiled software may crash.
+
+Save the file and exit nano.
+
+Here is a brief summary of the shipped ('stage 3') values are, and what our version achieves:
+Note
+As of 2019, the stage 3's shipped make.conf is rather minimal, since the majority of the important values are instead set by the active profile's make.defaults files (including the CHOST). The main instances of these may be viewed — once we have installed the Gentoo ebuild repository, in the next chapter — at (/mnt/gentoo)/var/db/repos/gentoo/profiles/default/linux/make.defaults and (/mnt/gentoo)/var/db/repos/gentoo/profiles/arch/amd64/make.defaults. (Gentoo's profile system allows multiple such make.defaults files to be sourced, to allow profiles to be constructed hierarchically.)
+For simplicity, the effective value has been shown in the table below.
+Variable 	Type 	Value in Stage 3's make.conf (or profile's make.defaults) 	Our Value 	Description
+COMMON_FLAGS 	Standard 	-O2 -pipe 	-march=native -O2 -pipe 	This variable simply defines some common flags, passed to the GNU Compiler Collection (GCC) what switches to use when compiling source code. The defaults specify -O2, which sets the recommended level of optimization (producing smaller, faster code at the expense of a slightly longer compilation), and -pipe, which instructs the compiler to use pipes rather than temporary files where possible (speeding up compilation in exchange for additional memory requirements). We retain these, and add -march=native. This instructs the compiler to detect your CPU type automatically, and then produce code exploiting its idiosyncratic features, special instruction sets and so on. Setting -march=native implies that code produced will very likely not run on other CPUs: don't use it if you intend to compile packages for use on other machines!.
+CFLAGS 	Standard 	${COMMON_FLAGS} 	${COMMON_FLAGS} 	This variable is sets the compiler flags for C code.
+CXXFLAGS 	Standard 	${COMMON_FLAGS} 	${COMMON_FLAGS} 	This is the equivalent of CFLAGS for C++ code. We retain the default behaviour, which is to use the common flags just defined.
+FCFLAGS 	Standard 	${COMMON_FLAGS} 	${COMMON_FLAGS} 	Flags passed to FORTRAN compilers in more modern build systems. Ditto.
+FFLAGS 	Standard 	${COMMON_FLAGS} 	${COMMON_FLAGS} 	Flags passed to the FORTRAN 77 compiler. Ditto.
+ACCEPT_LICENSE 	Incremental 	-* @FREE 	CC-Sampling-Plus-1.0 	This incremental variable controls which licenses are acceptable for packages used on your system, another nice feature of Portage. As of 23rd May 2019,[9] the default is to reset the variable (with -*) and then enable only the 'free' license metaset (with @FREE; you can review all such sets at /var/db/repos/gentoo/profiles/license_groups). (This is 'free' in the Free Software Foundation sense, so is relatively safe.[10])
+Here, we also allow CC-Sampling-Plus-1.0; essentially a free-use license (this adds to the baseline permissions, since the variable is incremental), but one which is not currently included in @FREE; it may be viewed at /var/db/repos/gentoo/licenses/CC-Sampling-Plus-1.0. It is needed for some GNOME components.
+CHOST 	Standard 	x86_64-pc-linux-gnu 	x86_64-pc-linux-gnu 	The CHOST variable is very important. It is a dash-separated tuple of architecture-vendor-operating_system-C_library and is used to control the build process. The default value here (architecture: x86_64, vendor: pc, operating system: linux, C library: gnu) is fine for our purposes so we will not change it. Although the profile will set this value, we specify it explicitly here, to avoid confusion should you want to setup multiple cross-compilation environments later. If you wish, you can omit it.
+ACCEPT_KEYWORDS 	Incremental 	amd64 	amd64 	This variable instructs Portage which ebuild keywords it should accept. As Gnome 3 has now been stabilized, there is no need to use the 'testing' branch; (but should you wish to do so, use '~amd64' rather than 'amd64'; please note that a consequence of doing so is that you will receive very up-to-date versions of all the software on your system (good), and occasionally, you may encounter the odd problem when updating (due to conflicts or bugs that have not yet surfaced and been resolved) (not so good)). We copy the value implicitly set by the profile here, for clarity; if you wish, you can omit it (unless electing to use ~amd64, of course).
+For avoidance of doubt, amd64 covers both Intel and AMD processors with a 64-bit architecture.
+USE 	Incremental 	various flags set by profile 	empty 	As discussed above, use flags specify package features to Portage (and often, but not always, map directly to autoconf feature options 'under the cover'[11][12][13]). As we will be building packages for a personal machine, and not for binary redistribution, we omit the bindist flag; omitting it allows certain additional codecs etc. to be enabled. (Note that this is an incremental variable, so leaving it blank here will not 'wipe out' any USE flags the profile has set; you'd have to specify "-*" if you really wanted to do that.)
+CPU_FLAGS_X86 	USE_EXPAND 	mmx mmxext sse sse2 	mmx mmxext sse sse2
+will set next chapter 	This variable instructs Portage which processor-specific flags to use (specifying the availability of particular capabilities such as MMX, for example). It is now recommended to use this separate flag group (which is valid on amd64 also, despite the name), rather than place CPU flags directly into USE. We leave the default settings for now, but will use the app-portage/cpuinfo2cpuflags package to derive the appropriate optimized settings for us automatically (from /proc/cpuinfo), in the next chapter. (Note - these architecture flags should not be mixed up with the compiler-related CFLAGS and CXXFLAGS, although they appear somewhat similar. Generally, architecture use flags will set package-features (for example, in ffmpeg, enabling specific blocks of pre-written assembly code).)
+PORTDIR 	Standard 	/var/db/repos/gentoo 	/var/db/repos/gentoo 	This variable simply defines the location of the Portage tree. We leave it as-is. NB: this has changed from the prior Gentoo default location (which was /usr/portage).
+DISTDIR 	Standard 	/var/cache/distfiles 	/var/cache/distfiles 	This variable defines where Portage will store its source code tarballs. We leave it as-is. NB this has also changed from the prior Gentoo default location (which was /usr/portage/distfiles).
+PKGDIR 	Standard 	/var/cache/binpkgs 	/var/cache/binpkgs 	This variable decides where binary packages will be stored, should you decide to download them (as an alternative to compiling from source), or to create your own (as a side-effect of compiling from source, as we will do in this tutorial). We leave the setting as is. (Note - if you intend to redistribute the binary packages created in ${PKGDIR}, you must set the bindist use flag, and should also set ACCEPT_RESTRICT="* -bindist" in /etc/portage/make.conf in such a case.) NB this location has also changed from the prior Gentoo default (which was /usr/portage/packages).
+LC_MESSAGES 	Standard 	C 	C 	This variable sets the language used for build system output. We leave it set to "C" here (which implies output in English), as that is required when filing bug reports, but you can change it to a more convenient value for day-to-day use, if you like.
+PORTAGE_ELOG_CLASSES 	Standard 	absent 	info warn error log qa 	This variable tells Portage what kinds of ebuild messages you want logged. The flags given here switch on all messages; modify to suit your own requirements (see the Gentoo Handbook, part 3 chapter 1 for more details).
+PORTAGE_ELOG_SYSTEM 	Standard 	absent 	echo save 	This variable instructs Portage what to do with log messages - in this case echo them to the console after the emerge, and also save them (rather than pass them to a user-defined command, etc.) Note that you can also instruct Portage to save your full build logs if you wish: see swift's blog post here.
+FEATURES 	Incremental 	various features set by profile 	split-elog buildpkg 	As its name suggests, this incremental variable is used to turn on (or off) optional Portage features. In this case, we turn on split-elog, which ensures that the logs just discussed get saved in category subdirectories of /var/log/portage/elog; this makes them easier to navigate, and we also turn on buildpkg, so that when packages are emerged, Portage will automatically create a matching binary package in ${PKGDIR} as a side-effect (which is useful for disaster recovery). If you want to add additional features, just append them to this variable, separated by a space.
+VIDEO_CARDS 	USE_EXPAND 	comprehensive list of video cards set by profile 	intel i965 	This variable is used to inform various packages which video card you have in your system (it is a USE_EXPAND variable). You can omit it, in which case modular support for all available systems is implied (as such, it's more efficient to specify it). The Panasonic CF-AX3 has modern integrated Intel graphics, as do many laptops, so we specify intel i965 here. If you have an nVidea card, and wish to use open-source drivers, you should specify nouveau instead here, for example; if an old ATI card from way before it was purchased by AMD, ati; if a pre-2015 ATI/AMD Radeon card, radeon; if you run a brand new Radeon R9 390 or RX 480, radeon amdgpu radeonsi, etc. (See these comments on the Gentoo wiki.)
+Note that for a simple fallback driver, which should work on most systems (albeit with relatively low resolution and performance), you can also specify vesa here. Another useful fallback value is fbdev, which specifies the simple x11-drivers/xf86-video-fbdev framebuffer device video driver. Those installing to a VirtualBox client — and for avoidance of doubt this won't apply to most readers — should specify fbdev virtualbox vmware here, for the broadest choice of drivers.
+INPUT_DEVICES 	USE_EXPAND 	various input devices set by profile 	libinput 	This variable instructs the X Window server (which we will be installing shortly) which input devices to support. It is also a USE_EXPAND variable.
+Note that whereas older systems might have typically specified "evdev synaptics" here, these are now replaced for most purposes simply by libinput, as above (see also these comments on the Gentoo wiki; libinput is also the default input driver for wayland compositors).
+Note
+When using incremental variables such as FEATURES, note that the above-mentioned 'auto-cascading' only works between (executed) configuration files, not within them. As such, if you wanted to e.g. add a second FEATURES line to /etc/portage/make.conf, you should use the FEATURES="${FEATURES} <newfeature>" rubric, to avoid discarding the first line's settings. Incidentally, it's always safe to use the above rubric, even the first time you set an incremental variable in a configuration file. Furthermore, it note that it is safe to have multiple flags added line-by-line in non-executed configuration files, such as those in /etc/portage/package.use/<...>, since these are externally parsed.
