@@ -31,3 +31,8 @@ mkdir -p ./opt/local/bin
 ```
 
 ### 
+
+```bash
+echo "*/* $(cpuid2cpuflags)" >> /etc/portage/package.use/00cpuflags
+```
+

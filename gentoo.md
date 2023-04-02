@@ -122,7 +122,7 @@ tar xpvJf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner --directory /mn
 
 ```
 
-### Some Extra Folders:
+### Some Extra Folders
 
 ```BASH
 cd /mnt/gentoo
@@ -135,6 +135,8 @@ chown -R root:100 ./{opt,Volumes}
 chmod -R 775 ./{opt,Volumes}
 ```
 
+## Some Extra Scripts
+
 ##### supperadduser (Slackware)
 
 ```bash
@@ -145,10 +147,12 @@ curl https://gitweb.gentoo.org/repo/gentoo.git/plain/app-admin/superadduser/file
 
 #### /etc/profile.d/local.sh
 
+
+
 ```bash
 #!/usr/bin/env bash
 # ############################################################################
-# # PATH: /etc/profile.d						   AUTHOR:Hoefkens.j@gmail.com
+# # PATH: /etc/profile.d						  AUTHOR: Hoefkens.j@gmail.com
 # # FILE: local_opt.sh
 # ############################################################################
 #
@@ -167,50 +171,8 @@ export USER_CONFIG="${HOME}/.${_CONFIG}}/${_RC}"
 #### /etc/profile.d/sourcedir.sh
 
 ```bash
-#!/usr/bin/env bash
-# ############################################################################
-# # PATH: /etc/profile.d						   AUTHOR:Hoefkens.j@gmail.com
-# # FILE: sourcedir.sh
-# ############################################################################
-# This File Needs to be Sourced not Executed ! 
-function sourcedir {
-	HELP="$FUNCNAME [-h] [DIR] [MATCH] 
-Arguments:
-  DIR 	:	Directory to source files from. 
-          Files that return True when tested aganst [MATCH] will be sourced
-  MATCH	:	String to match Files against. Globbing and Expansion follow Bash Settings
-          (Default)  : [0-9][0-9][0-9][_-]*  
-          Examples:								
-            [0-9]??[_-]* : Matches: 109_myconfig.conf , 02a-myconfig
-            [0-2]*       : Matches: 2anythinghere
-            *.sh         : Matches: any.sh
-Options:
-  -h	--help  show this help text
-"
-	function _m { printf "\x1b[${1};3${2}m${3}\x1b[m" ;   }
-	function _G { printf "\x1b[${1}G" ;   }
-	function _progress { _G 12 ; _m 1 3 $SRC ; _G $GC ; _m 1 2 $1 ; _m 1 7 "/" ; _m 1 2 $N; _m 1 7 "]" ; }
-	function _mask { _G 0 ; _m 0 7 "Sourcing:" ; _G $GP ; _m 1 7 "["; _G $GS ; _m 1 7 "/" ; _m 1 2 $N ; _m 1 7 "]" ; }
-	function _main {
-		SRC=$(realpath "${1}")	
-		[[ -z "${2}" ]] && MATCH="[0-9]??*" || MATCH="${2}"
-		I=0 ; SELECTED=$SRC/$MATCH ; N=$(ls $SELECTED 2>/dev/null|wc -l) ; W="${#N}" ;	GP=$((75-6-$W*2)) ; GC=$(($GP+1)) ; GS=$(($GP+$W+1)) 
-		_mask 		
-		I=0
-		for CONF in $SELECTED ; do
-			I=$(($I+1))
-			[[ -r $CONF ]] && source $CONF && _progress $I
-		done
-		#[[ $N > 0 ]] && _progress $I
-		printf " \x1b[75G\x1b[32mDONE\n"
-	}
-	case "$1" in
-		'') echo "$HELP" ;;
-		-h) echo "$HELP" ;;
-		--help) echo "$HELP" ;;
-		*) _main $@
-	esac
-}
+cd /mnt/Install
+curl https://raw.githubusercontent.com/hoefkensj/SourceDir/main/sourcedir-latest.sh -o ./sourcedir.sh
 ```
 
 #### /opt/local/config/rc/bash/000_bashrc.conf
@@ -218,25 +180,21 @@ Options:
 ```bash
 #!/usr/bin/env bash
 # ############################################################################
-# # PATH: /opt/local/scripts/rc/bash/
+# # PATH: /opt/local/config/rc/bash/              AUTHOR: Hoefkens.j@gmail.com
 # # FILE: 000_bashrc.conf
 # ############################################################################
 #
 # Share X Server With All Users
 xhost + > /dev/null 2>&1
 # Source system wide shared bashrc sources file
-[[ -r "${RC_LOCAL}/bash/100_includes.conf" ]] && source "${RC_LOCAL}/bash/100_includes.conf"
+[[ -r "${LOCAL_CONFIG_RC}/bash/000_bashrc.conf" ]] && sourcedir "${LOCAL_CONFIG_RC}}/bash/"
 # Dont do anything if not interactivel:
 [[ $- != *i* ]] && return
 
 # Load Profile Again : Nice to have when chrooting
-[[ -r /etc/profile ]] && source /etc/profile
+[[ -z $(systemd-detect-virt -r) ]] && source /etc/profile
 # Try to keep environment pollution down, EPA loves us.
 unset use_color sh
-#
-# ###########################################################################
-# # EOF:: /opt/local/scripts/rc/bash/000_bashrc.conf
-#############################################################################
 ```
 
 #### /opt/local/config/rc/bash/100_includes.conf
@@ -308,6 +266,16 @@ shopt -s nocaseglob
 # ###########################################################################
 # # EOF:: /opt/local/scripts/rc/bash/201_opts.conf
 #############################################################################
+```
+
+## PORTAGE
+
+### Create Some local Repositories
+
+```
+eselect repository create gentoo_legacy
+eselect repository create kranklab
+eselect repository create kranklab_ver
 ```
 
 ## Configuring /etc/portage/make.conf
