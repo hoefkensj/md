@@ -17,6 +17,52 @@ The install described in this tutorial attempts to follow the 'stock' process fr
 * Validate that all bin executables and libs have been rebuilt from source
 * Lastly, detailed (optional) instructions for disabling the Intel Management Engine[2] will be provided (for those with Intel-CPU-based PCs who find this out-of-band coprocessor an unacceptable security risk), as will instructions for fully sandboxing the popular firefox web browser, using firejail
 
+## Root  not Sudo
+
+First lets become ROOT , saving us from having to type sudo , doas or su -c before each command. and avoid messing up by missing one. On most distro's you can just use the `su` command to do so ,` su` or SwitchUser defaults to `su root` when no user is specified. However on some distro's the root account has no password set and is therefore not accessible , these distro's require you to use sudo. There is a quick workaround for those distros. For amost everyone:
+
+```bash
+su 
+```
+
+for those who cant become root that way:
+
+```bash
+sudo su 
+```
+
+this will ask for your sudo password and then switch to the root account. why this works is when you run a command with sudo you run this command as the root user. and the way most distro's that use this have it set up is that you need your users password in order to run any command as sudo. running `su` , or actually `su root`  wich translates to switch to ROOT , doesnt prompt for the login password since its the 'root' users that runs it (trough sudo) if that makes sense? its a good idea to set a root password just in case you require another shell to login as and what not so once in the root shell: : 
+
+```bash
+passwd root
+```
+
+for now i suggest choosing a simple one , you can remove it and revert to the original situation later on . 
+
+then in this root shell lets make things easy for ourselfs: start your favorite terminal emulator from that root shell but with some extra considerations , i use KDE's `konsole` , if you like `Terminology` `gnome-terminal` `xterm` or what not just substitute that in into the following command : 
+
+```bash
+nohup konsole &
+```
+
+what does this meand / do ?
+
+nohup , starts the process , in a way it ignores hangup signals , a hangup signal is oa send when you exit the shell. when you close the terminal window. you probably have done this a couple times by accident. 
+
+`&` is usually  the symbol to start the process in the background , in this case because its a gui application , the gui  will still just show , but it makes the prompt availeble again in the terminal where you started it . in fact  you can close that shell and the konsole window should remain open.
+
+### Screen ,Tmux
+
+if you are familiar with one of those , pick one, if you arent i will be using Tmux, screen is defenetly installed on your distoro (i hope , if its not , its not that big of a program ~ couple 100kb i think), or install tmux wich is easier to use (imho)
+
+```bash
+tmux
+```
+
+remember to always run this whenever you open a new tab , you will be greatefull that you did later on.
+
+
+
 ## Formatting
 
 ```bash
@@ -26,14 +72,21 @@ mksfs.f2fs -f -l GENTOO -O extra_attr,inode_checksum,sb_checksum,flexible_inline
 ## Creating Folders
 
 ```bash
-su -c 'mkdir -p /mnt/gentoo
-su -c 'chmod 777 /mnt/gentoo
+mkdir -p /mnt/{gentoo,install}
+chmod 777 /mnt/mnt/{gentoo,install}
 ```
 
 ## Mounting
 
+### TempFs (~ramdisk) 
+
+its a good idea to  create a tempfs in the installation folder , alets not clutter the fresh filesystem with files that will be deleted or moved later on , creating a gap at the beginning of the partition.  if you have enough free 'Memory'. we don't need much  for this , ~1GB will be enough , if you dont have 1GB free memory (spare), you can just leave the folder as a folder on the current (old) root drive (given that it has 1GB free space ofc)
+
 ```bash
+#the new root Volume:
 mount -t f2fs -o rw,relatime,lazytime,background_gc=on,discard,no_heap,inline_xattr,inline_data,inline_dentry,flush_merge,extent_cache,mode=adaptive,active_logs=6,alloc_mode=default,checkpoint_merge,fsync_mode=posix,discard_unit=block  /dev/disk/by-label/GENTOO /mnt/gentoo
+#the Installation Files 
+mount -o size=1G -t tmpfs tmpfs /mnt/Install
 ```
 
 ### Mount-Options  Overview
@@ -57,24 +110,11 @@ fsync_mode=posix,
 discard_unit=block
 ```
 
-# Getting The Installation Files
-
-## Folder For the installation Files
-
 ```bash
-cd /mnt/gentoo
-mkdir /mnt/Install
+
 ```
 
-### TempFs (~ramdisk) 
-
-lets create a tempfs in the installation folder , lets not clutter the fresh filesystem with files that will be deleted or moved later on , creating a gap at the beginning of the partition.
-
-```bash
-mount -o size=1G -t tmpfs tmpfs /mnt/Install
-```
-
-## Some Env Vars
+## Automate the Stage3 Downloads (tarbal and verificationkeys)
 
 ```bash
 export MIRROR="http://mirror.yandex.ru/gentoo-distfiles/releases/amd64/autobuilds/"
@@ -85,7 +125,8 @@ export STAGE3_URL="${MIRROR}$(curl  --silent $MIRROR$LATEST | tail -n1 |awk '{pr
 ## Downloading the files
 
 ```bash
-cd /mnt/Install
+mkdir -p /mnt/Install/gentoo-stage3
+cd $_
 wget -c "${STAGE3_URL}"
 wget -c "${STAGE3_URL}.CONTENTS.gz"
 wget -c "${STAGE3_URL}.DIGESTS"
@@ -116,7 +157,6 @@ awk '/SHA512 HASH/{getline;print}' stage3-amd64-*.tar.xz.DIGESTS.asc | sha512sum
 ## Unpack the verified stage 3 archive
 
 ```bash
-cd /mnt/Install
 tar xpvJf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner --directory /mnt/gentoo
 # x:extract, p:preserve permissions, J:xz-compression f:file
 
@@ -135,138 +175,24 @@ chown -R root:100 ./{opt,Volumes}
 chmod -R 775 ./{opt,Volumes}
 ```
 
-## Some Extra Scripts
+## Extra Scripts
 
 ##### supperadduser (Slackware)
 
 ```bash
-cd /mnt/Install
-curl https://gitweb.gentoo.org/repo/gentoo.git/plain/app-admin/superadduser/files/1.15/superadduser -o ./superadduser.sh 
-
+mkdir -p /mnt/Install/scripts/superadduser
+curl https://gitweb.gentoo.org/repo/gentoo.git/plain/app-admin/superadduser/files/1.15/superadduser -o  $_/superadduser.sh 
 ```
 
-#### /etc/profile.d/local.sh
-
-
+##### sourcedir
 
 ```bash
-#!/usr/bin/env bash
-# ############################################################################
-# # PATH: /etc/profile.d						  AUTHOR: Hoefkens.j@gmail.com
-# # FILE: local_opt.sh
-# ############################################################################
-#
-# LOCAL Variables : required for loading the LOCAL(this system & system wide) bash (running-)config (rc)
-_HOME='/opt/local';_CONFIG='config';_RC="rc"
-export LOCAL="${_HOME}"
-export LOCAL_CONFIG="${_HOME}/${_CONFIG}"
-export LOCAL_CONFIG_RC="${_HOME}/${_CONFIG}/${_RC}"
-export USER_CONFIG="${HOME}/.${_CONFIG}}"
-export USER_CONFIG="${HOME}/.${_CONFIG}}/${_RC}"
-# Check $PATH for /opt/bin , /opt/local/scripts/ and /opt/local/bin, if missing add, and export if needed
-[[ ":$PATH:" != *":/opt/bin:"* ]]  && export PATH="/opt/bin:${PATH}"
-[[ ":$PATH:" != *":/opt/local/bin:"* ]]  && export PATH="/opt/local/bin:${PATH}"
-```
-
-#### /etc/profile.d/sourcedir.sh
-
-```bash
-cd /mnt/Install
+mkdir -p /mnt/Install/scripts/sourcedir
 curl https://raw.githubusercontent.com/hoefkensj/SourceDir/main/sourcedir-latest.sh -o ./sourcedir.sh
+cp -v /mnt/Install/scripts/sourcedir/sourcedir.sh /etc/profile.d/sourcedir.sh
 ```
 
 #### /opt/local/config/rc/bash/000_bashrc.conf
-
-```bash
-#!/usr/bin/env bash
-# ############################################################################
-# # PATH: /opt/local/config/rc/bash/              AUTHOR: Hoefkens.j@gmail.com
-# # FILE: 000_bashrc.conf
-# ############################################################################
-#
-# Share X Server With All Users
-xhost + > /dev/null 2>&1
-# Source system wide shared bashrc sources file
-[[ -r "${LOCAL_CONFIG_RC}/bash/000_bashrc.conf" ]] && sourcedir "${LOCAL_CONFIG_RC}}/bash/"
-# Dont do anything if not interactivel:
-[[ $- != *i* ]] && return
-
-# Load Profile Again : Nice to have when chrooting
-[[ -z $(systemd-detect-virt -r) ]] && source /etc/profile
-# Try to keep environment pollution down, EPA loves us.
-unset use_color sh
-```
-
-#### /opt/local/config/rc/bash/100_includes.conf
-
-```bash
-#!/usr/bin/env bash
-# ############################################################################
-# # PATH: /opt/local/config/rc/bash/
-# # FILE: 100_includes.conf
-# ############################################################################
-#
-printf "\x1b[0G\x1b[1;37mSourcing: \x1b[1;33m bash_completion "
-[[ -r /usr/share/bash-completion/bash_completion ]] && . /usr/share/bash-completion/bash_completion
-printf "\x1b[38G"
-printf "\x1b[1;37m["
-printf "\x1b[39G\x1b[1;32m1"
-printf "\x1b[40G\x1b[0;37m/"
-printf "\x1b[41G\x1b[1;37m1"
-printf "\x1b[42G\x1b[1;37m]"
-printf '\x1b[45G\x1b[1;32mDONE\x1b[0m\n'
-
-[[ -r /opt/local/scripts/rc/bash/101_sources.conf ]] && source /opt/local/scripts/rc/bash/101_sources.conf
-#
-# ###########################################################################
-# # EOF:: /opt/local/scripts/rc/bash/100_includes.conf
-#############################################################################
-```
-
-```bash
-cp -v /opt/local/scripts/rc/bash/{0-9}
-```
-
-```bash
-#!/usr/bin/env bash
-# ############################################################################
-# # PATH: /opt/local/scripts/rc/bash/
-# # FILE: 201_opts.conf
-# ############################################################################
-#
-# Bash won't get SIGWINCH if another process is in the foreground.
-# Enable checkwinsize so that bash will check the terminal size when
-# it regains control.  #65623
-# http://cnswww.cns.cwru.edu/~chet/bash/FAQ (E11)
-shopt -s checkwinsize
-# Disable completion when the input buffer is empty.  i.e. Hitting tab
-# and waiting a long time for bash to expand all of $PATH.
-shopt -s no_empty_cmd_completion
-# extended globbing
-shopt -s extglob
-# expand aliasses in .bash/aliases.bashrc
-shopt -s expand_aliases
-# enable * wildcard includes .-files (ex: rm ~/tmp/* removes .test and test |fix for .* wich includes ..)
-shopt -s dotglob
-# reedit a history substitution line if it failed
-shopt -s histreedit
-# edit a recalled history line before executing
-shopt -s histverify
-# Enable history appending instead of overwriting.  #139609
-shopt -s histappend
-# change to named directory
-shopt -s autocd
-# autocorrects cd misspellings
-shopt -s cdspell
-# save multi-line commands in history as single line
-shopt -s cmdhist
-# no Case globbing
-shopt -s nocaseglob
-#
-# ###########################################################################
-# # EOF:: /opt/local/scripts/rc/bash/201_opts.conf
-#############################################################################
-```
 
 ## PORTAGE
 
@@ -275,7 +201,7 @@ shopt -s nocaseglob
 ```
 eselect repository create gentoo_legacy
 eselect repository create kranklab
-eselect repository create kranklab_ver
+eselect repository create kranklab_bump
 ```
 
 ## Configuring /etc/portage/make.conf
@@ -291,13 +217,14 @@ ACCEPT_LICENSE="*"
 ACCEPT_KEYWORDS="amd64"
 ABI_X86="32 64"
 
-CPU_FLAGS_X86="aes avx avx2 fma3 mmx mmxext popcnt sse sse2 sse3 sse4_1 sse4_2 ssse3 f16c pclmul"
+# REPLACED BY : echo "*/* $(cpuid2cpuflags)" >> /etc/portage/package.use/00cpuflags
+#cpuid2cpuflags 
+#CPU_FLAGS_X86: aes avx avx2 f16c fma3 mmx mmxext pclmul popcnt rdrand sse sse2 sse3 sse4_1 sse4_2 ssse3
+#CPU_FLAGS_X86="aes avx avx2 f16c fma3 mmx mmxext pclmul popcnt rdrand sse sse2 sse3 sse4_1 sse4_2 ssse3"
 
 COMMON_FLAGS="-O2 -pipe"
 # gcc -march=native -E -v - </dev/null 2>&1 | sed  -n 's/.* -v - //p'
-COMMON_FLAGS="${COMMOM_FLAGS} -march=skylake -mmmx -mpopcnt -msse -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -mavx -mavx2 -mno-sse4a -mno-fma4 -mno-xop -mfma -mno-avx512f -mbmi -mbmi2 -maes -mpclmul -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd -mno-avx512er -mno-avx512pf -mno-avx512vbmi -mno-avx512ifma -mno-avx5124vnniw -mno-avx5124fmaps -mno-avx512vpopcntdq -mno-avx512vbmi2 -mno-gfni -mno-vpclmulqdq -mno-avx512vnni -mno-avx512bitalg -mno-avx512bf16 -mno-avx512vp2intersect -mno-3dnow -madx -mabm -mno-cldemote -mclflushopt -mno-clwb -mno-clzero -mcx16 -mno-enqcmd -mf16c -mfsgsbase -mfxsr -mno-hle -msahf -mno-lwp -mlzcnt -mmovbe -mno-movdir64b -mno-movdiri -mno-mwaitx -mno-pconfig -mno-pku -mno-prefetchwt1 -mprfchw -mno-ptwrite -mno-rdpid -mrdrnd -mrdseed -mno-rtm -mno-serialize -msgx -mno-sha -mno-shstk -mno-tbm -mno-tsxldtrk -mno-vaes -mno-waitpkg -mno-wbnoinvd -mxsave -mxsavec -mxsaveopt -mxsaves -mno-amx-tile -mno-amx-int8 -mno-amx-bf16 -mno-uintr -mno-hreset -mno-kl -mno-widekl -mno-avxvnni --param l1-cache-size=32 --param l1-cache-line-size=64 --param l2-cache-size=8192 -mtune=skylake -dumpbase -"
-
-
+COMMON_FLAGS="${COMMOM_FLAGS} -march=skylake -mmmx -mpopcnt -msse -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -mavx -mavx2 -mno-sse4a -mno-fma4 -mno-xop -mfma -mno-avx512f -mbmi -mbmi2 -maes -mpclmul -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd -mno-avx512er -mno-avx512pf -mno-avx512vbmi -mno-avx512ifma -mno-avx5124vnniw -mno-avx5124fmaps -mno-avx512vpopcntdq -mno-avx512vbmi2 -mno-gfni -mno-vpclmulqdq -mno-avx512vnni -mno-avx512bitalg -mno-avx512bf16 -mno-avx512vp2intersect -mno-3dnow -madx -mabm -mno-cldemote -mclflushopt -mno-clwb -mno-clzero -mcx16 -mno-enqcmd -mf16c -mfsgsbase -mfxsr -mno-hle -msahf -mno-lwp -mlzcnt -mmovbe -mno-movdir64b -mno-movdiri -mno-mwaitx -mno-pconfig -mno-pku -mno-prefetchwt1 -mprfchw -mno-ptwrite -mno-rdpid -mrdrnd -mrdseed -mno-rtm -mno-serialize -msgx -mno-sha -mno-shstk -mno-tbm -mno-tsxldtrk -mno-vaes -mno-waitpkg -mno-wbnoinvd -mxsave -mxsavec -mxsaveopt -mxsaves -mno-amx-tile -mno-amx-int8 -mno-amx-bf16 -mno-uintr -mno-hreset -mno-kl -mno-widekl -mno-avxvnni --param l1-cache-size=32 --param l1-cache-line-size=64 --param l2-cache-size=8192 -mtune=skylake"
 CFLAGS="${COMMON_FLAGS}"
 CXXFLAGS="${COMMON_FLAGS}"
 FCFLAGS="${COMMON_FLAGS}"
@@ -313,27 +240,18 @@ PKGDIR="/var/cache/binpkgs"
 LC_MESSAGES=C
 L10N="en"
 
-#MAKEOPTS="-j1"
+# MAKEOPTS="-j1" 
 MAKEOPTS="-j6 -l6"
 
-# -v --verbose      # -b --buildpkg     # -D --deep # -g --getbinpkg        # -k --usepkg           # -u update
-# -N --newuse       # -l load-average   # -t --tree # -G --getbinpkgonly    # -k --uspkgonly        # -U changed-use
-# -o --fetchonly    # -a ask            # -f --fuzzy-search
-# --binpkg-respect-use=[y/n]
 
-#  --list-sets      # --alphabetical    # --color=y    # --verbose-conflicts
-#  -backtrack=COUNT
-
-# --complete-graph=y
-# --emptytree
-
-# --with-bdeps=y    #
-
-# --autounmask=y    # --autounmask-write=y  # --autounmask-continue=y  --autounmask-backtrack=y
-# --usepkg-exclude 'sys-kernel/gentoo-sources virtual/*'
-
-
-
+# EMERGE_DEFAULT_OPTS
+# -v --verbose      # -b --buildpkg     # -D --deep 			# -g --getbinpkg        # -k --usepkg
+# -u update			# -N --newuse       # -l load-average		# -t --tree				# -G --getbinpkgonly
+# -k --uspkgonly	# -U changed-use	# -o --fetchonly		# -a ask				# -f --fuzzy-search
+# --list-sets		# --alphabetical    # --color=y 			# --with-bdeps=y		# --verbose-conflicts
+# --complete-graph=y					# --backtrack=COUNT 							# --binpkg-respect-use=[y/n]
+# --autounmask=y    					# --autounmask-continue=y  						# --autounmask-backtrack=y
+# --autounmask-write=y 					# --usepkg-exclude 'sys-kernel/gentoo-sources virtual/*'
 # EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --jobs=9 -b -v -D" --tree, -t--verbose-conflicts
 
 AUTOUNMASK=""
@@ -341,16 +259,11 @@ AUTOUNMASK="${AUTOUNMASK} --autounmask=y  --autounmask-continue=y --autounmask-w
 AUTOUNMASK="${AUTOUNMASK} --autounmask-unrestricted-atoms=y --autounmask-license=y"
 AUTOUNMASK="${AUTOUNMASK} --autounmask-use=y --autounmask-write=y"
 
-
-EMERGE_DEFAULT_OPTS="-v"
+EMERGE_DEFAULT_OPTS="--verbose"
 EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --jobs=4 --load-average=4"
-EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --with-bdeps=y "
+#EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --with-bdeps=y "
 #EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} ${AUTOUNMASK}"
-#MERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --buildpkg=y"
 EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --color=y --alphabetical --verbose-conflicts"
-#EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --usepkg-exclude 'sys-kernel/gentoo-sources virtual/*'"
-#EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --binpkg-respect-use=n"
-
 
 ### FEATURES
 #FEATURES="${FEATURES} fixlafiles"
@@ -400,7 +313,6 @@ GENTOO_MIRRORS="${GENTOO_MIRRORS} rsync://mirror.leaseweb.com/gentoo/"
 # BINPKG
 #BINPKG_FORMAT="gpkg"
 #BINPKG_COMPRESS="lz4"
-
 #PORTAGE_BINHOST="https://gentoo.osuosl.org/experimental/amd64/binpkg/default/linux/17.1/x86-64/"
 #PORTAGE_BINHOST="${PORTAGE_BINHOST} http://packages.gentooexperimental.org/packages/amd64-stable/"
 #PORTAGE_BINHOST="${PORTAGE_BINHOST} http://packages.gentooexperimental.org/packages/amd64-stable/"
@@ -420,12 +332,12 @@ INPUT_DRIVERS="evdev"
 # Echo messages after emerge, also save to /var/log/portage/elog
 #PORTAGE_ELOG_SYSTEM="echo save"
 
-USE="pipewire iwd jack nvenc nvidia wayland gles2 git plasma opencl tools \
-persistenced thunderbolt opengl egl usb wifi python X \
-libsamplerate opencv rtaudio 7zip custom-cflags grub network otf \
-ttf kde systemd dbus dri nvme uefi semantic-desktop vulkan \
-modplug modules lm-sensors hddtemp bluetooth qt5 alsa designer \
-multimedia sensors cuda bzip2 aac aalib acpi ao appindicator \
+USE="gles2 opencl tools \
+persistenced \
+libsamplerate opencv custom-cflags grub network  \
+dri semantic-desktop \
+modplug modules \
+multimedia  aac aalib acpi ao appindicator \
 audiofile bash-completion branding cairo cdb cdda cddb cdr cgi \
 colord crypt css curl dbm dga dts dv dvb dvd dvdr encode exif \
 fbcon ffmpeg fftw flac fltk fontconfig fortran ftp gd gif \
@@ -443,24 +355,28 @@ videos vim-syntax vnc vorbis wavpack webkit webp wmf wxwidgets \
 x265 xattr xcomposite xine xinerama xinetd xml xmp xmpp xosd \
 xpm xv xvid zeroconf zip zlib zsh-completion zstd source \
 quicktime script openexr echo-cancel extra gstreamer jack-sdk lv2 \
-pipewire-alsa sound-server system-service v4l2 zimg \
+ sound-server system-service v4l2 zimg \
 rubberband pulseaudio libmpv gamepad drm cplugins archive screencast \
-gbm mysql rar examples nftables midi"
+gbm mysql  examples nftables "
 ```
 
 ```bash
 #Codecs:
-a52,aac,aalib,audiofile,bzip2,cdb,
+a52,aac,aalib,audiofile,cdb,nvenc,libsamplerate,otf,ttf
 #Hardware
-acpi,ao,bluetooth,cdr,pipewire
+acpi,ao,bluetooth,cdr,pipewire,jack,nvidia,thunderbolt,usb,jack,rtaudio,systemd,dbus,nvme,uefi,lm-sensors,hddtemp,alsa,sensors,midi,pipewire-alsa
 #Filesystem
 afs
 #Network
-apache2,atm,cddb,curl,iwd,
+apache2,atm,cddb,curl,iwd,wifi,network
 #Gui
-appindicator,cairo,colord
+appindicator,cairo,colord,wayland,plasma,opengl,X,kde,vulkan,qt5
+#Development
+python,designer,cuda
 #tools
-bash-completion,crypt
+bash-completion,crypt,git
+# Archiving
+7zip,bzip2,rar
 ```
 
 ## Configuring /etc/portage/make.conf

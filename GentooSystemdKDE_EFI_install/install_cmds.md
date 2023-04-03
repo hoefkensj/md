@@ -1,14 +1,15 @@
 ```bash
+su -c 'nohup qterminal & '
+tmux
 mksfs.f2fs -f -l GENTOO -O extra_attr,inode_checksum,sb_checksum,flexible_inline_xattr -w 4096 /dev/disk/by-partlabel/GENTOO
-su -c 'mkdir -p /mnt/gentoo'
-su -c 'chmod 777 /mnt/gentoo'
+mkdir -p /mnt/{gentoo,install}
+chmod 777 /mnt/mnt/{gentoo,install}
 mount -t f2fs -o rw,relatime,lazytime,background_gc=on,discard,no_heap,inline_xattr,inline_data,inline_dentry,flush_merge,extent_cache,mode=adaptive,active_logs=6,alloc_mode=default,checkpoint_merge,fsync_mode=posix,discard_unit=block  /dev/disk/by-label/GENTOO /mnt/gentoo
+mount -o size=1G -t tmpfs tmpfs /mnt/Install
 export MIRROR="http://mirror.yandex.ru/gentoo-distfiles/releases/amd64/autobuilds/"
 export LATEST="latest-stage3-amd64-desktop-systemd-mergedusr.txt"
 export STAGE3_URL="${MIRROR}$(curl  --silent $MIRROR$LATEST | tail -n1 |awk '{print $1}')"
-cd /mnt/gentoo
-mkdir .Install
-cd $_
+mkdir -p /mnt/Install/gentoo-stage3 && cd $_
 wget -c "${STAGE3_URL}"
 wget -c "${STAGE3_URL}.CONTENTS.gz"
 wget -c "${STAGE3_URL}.DIGESTS"
