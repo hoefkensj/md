@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# ############################################################################
+# # PATH: /opt/local/config/rc/bash               AUTHOR: Hoefkens.j@gmail.com
+# # FILE: 311_history.conf                                 2023-04-04 09:33:40
+# ############################################################################
+#
+HISTDIR="/var/cache/bash/history"
+
+HISTGLOBAL="${HISTDIR}/history.glob"   #everything of everything chronological
+HISTGLOBALUNIQ="${HISTDIR}/history.uniq.glob" #same but only uniq entries
+HISTGLOBALBYSESSION="${HISTDIR}/history.uniq.glob" 
+HISTSESSION="${HISTDIR}/history.session.$$"
+HISTSESSIONS="${HISTDIR}/history.session.[0-9]*"
+

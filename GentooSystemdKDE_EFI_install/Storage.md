@@ -21,6 +21,8 @@
   - SystemD
   - EFI/BOOTLOADER-SPEC
 
+
+
 ### MBR (how it used to be)
 
 *(this is not 100% technically correct but it should be close enough (usable to think with it) while also simple enough )* 
@@ -29,9 +31,13 @@ A BIOS was a fairly Straight Forward thing , hence the name : Basic Input Output
 
 before pc's had harddisks by  default there was the Floppy Drive and later Diskettes. in order to  be usable you had to place a floppy in the pc that had an operating system on it when powering on the pc... this was somewhat hardcoded in the bios , when POST is successfull goto this #ADDRESS ,in the adress space (wich just had been enumerated), and that was it the cpu read whatever was on that adress and executed that as next instruction.
 
-a floppy's first Sector (512Byte in size), named the Master Boot (from bootstrapping onself) Record [MBR] of that drive , Initially holding the kernel of the OS , but when they became larger than 512bytes the code that came in its place was just a pointer for where to find the actual kernel on the drive. since it was nonstarter to account for any possible adress in the bios for where the kernel could be (considering that if the order of hardware changed at all the whole adress space schifts around) . a floppy usually holding 1partition would have a pointer here that points to the start of the first partition, the first 512Bytes of that partiton could have the kernel or could have another MBR, that points directly to the kernel or to a place in the (for FAT) File Allocation Table   for where to find the ker
+a floppy's first Sector (512Byte in size), named the Master Boot (from bootstrapping onself) Record [MBR] of that drive , Initially holding the kernel of the OS , but when they became larger than 512bytes the code that came in its place was just a pointer for where to find the actual kernel on the drive. since it was nonstarter to account for any possible adress in the bios for where the kernel could be (considering that if the order of hardware changed at all the whole adress space schifts around) . a floppy usually holding 1partition would have a pointer here that points to the start of the first partition, the first 512Bytes of that partiton could have the kernel or could have another MBR, that points directly to the kernel or to a place in the (for FAT) File Allocation Table   for where to find the kernel
 
 In order for a PC to do something after POST (the procedure where the pc tests itself, this later included auto-detection and configuration of connected hardware)
+
+### GPT (the current Situation)
+
+GUID Partition Table is also a 'simple' table holding the information on the locations of the partition, but now with also the partition type , defined by the GUID. and no limit of 4 partitions but much much more. so the size of that table is also larger. there is also no bootflag anymore but the Bios or its newer variant : the SuperIO , capable of understanding  the GPT structure looks for the ESP or Efi System Partition, and (some) even autodetect and list all availeble .efi bootloaders on that disk. other require manually adding them in the system setup.
 
 Our disk should be GPT formatted there should be 1 ESP on the system with size minimally 1024MB  to be comfortable later on. and 1 partition for the system root (installation disk) thats it everything else is optional. in both cases its worth giving the partitions a PARTLABEL, at this stage , this is not the same as the filesytem label. also trake note that for maximum compat its a good idea (unlike any installer for linux out there that ignores this while it does go hand in hand with a nice feature of systemd ), to also set the GUID of the partition correctly this would be (gdisk shorthands):
 
@@ -128,7 +134,7 @@ fc00    :     VMWare kcore crash protection
 fd00    :     Linux RAID
 ```
 
-out of these these are the ones most likely to be of use to us:
+out of these these are the ones most likely to be of use to us:8be4df61-93ca-11d2-aa0d-00e098032b8c-BootOptionSupport
 
 ```ini
 ef00    :     EFI system partition

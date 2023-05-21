@@ -20,15 +20,15 @@ gpg --keyserver hkps://keys.gentoo.org --recv-keys D99EAC7379A850BCE47DA5F29E643
 gpg --verify "${LATEST}.asc"
 gpg --verify stage3-amd64-*.tar.xz.DIGESTS.asc
 awk '/SHA512 HASH/{getline;print}' stage3-amd64-*.tar.xz.DIGESTS.asc | sha512sum --check 
-cp -v  stage3-*.tar.xz /mnt/gentoo
-cd /mnt/gentoo
-tar xpvf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner
-#tar xvJpf stage3-amd64-*.tar.xz --xattrs-include='*.*' --numeric-owner 
-mkdir ./{Volumes,}
-mkdir -p ./etc/portage/package.{accept_keywords,license,mask,unmask,use,env}
-mkdir -p ./opt/local/scripts/{rc/bash,sh}
-mkdir -p ./opt/bin
-mkdir -p ./opt/local/bin
+tar xpvJf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner --directory /mnt/gentoo
+mkdir -p /mnt/gentoo/{Volumes,etc/portage/package.{accept_keywords,license,mask,unmask,use,env},opt/{bin,scripts,local/{bin,scripts,config/rc/bash}}}
+chown -R root:100 ./{opt,Volumes}
+chmod -R 775 /mnt/gentoo/{opt,Volumes}
+mkdir -p /mnt/Install/scripts/superadduser
+curl https://gitweb.gentoo.org/repo/gentoo.git/plain/app-admin/superadduser/files/1.15/superadduser -o  /mnt/Install/superadduser.sh 
+mkdir -p /mnt/Install/scripts/sourcedir
+curl https://raw.githubusercontent.com/hoefkensj/SourceDir/main/sourcedir-latest.sh -o ./sourcedir-latest.sh
+cd https://github.com/hoefkensj/GentooGuide.git
 ```
 
 ### 

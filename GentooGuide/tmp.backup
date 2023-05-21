@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ############################################################################
+# # PATH: /opt/local/config/rc/bash               AUTHOR: Hoefkens.j@gmail.com
+# # FILE: 311_history.conf                                 2023-04-04 09:33:40
+# ############################################################################
+#
+#ENV VARIABLE's
+HISTDIR= "/var/cache/bash/history"
+HISTGLOBAL= "${HISTFOLDER}/history.glob"
+HISTSESSION= "${HISTFOLDER}/history.session.$$"
+HISTFILE= "${HISTFOLDER}/history.$$"
+HISTSESSIONS="${HISTFOLDER}/history.[0-9]*"
+HISTSIZE=-1 ; HISTFILESIZE="$HISTSIZE" ; HISTCONTROL=''
+
+
+function _bash_hist_orphans {
+	local ACTIVE PATTERN ORPHANED
+	
+	ACTIVE=$(pgrep `ps -p $$ -o comm=`)
+	PATTERM=`for pid in $_active; do echo -n "-e \.${pid}\$ "; done`
+	ORPHANED=`ls $HISTSESSIONS 2>/dev/null | grep -v $_pattern`
+	
+	function _merge {
+		echo Merging orphaned history files:
+		for f in $_orphaned; do
+			echo "  `basename $f`"
+			cat $f >> $HISTGLOBAL
+			\rm $f
+		done
+	}
+	function _remove {
+		for f in $_orphaned; do
+			gio trash $f 2>/dev/null || rm -fv $f
+		done
+	}
+	[[ -n "$1" ]] && "$1"
+	unset _merge _remove
+}
+function _bash_history {
+	builtin history -a "$HISTFILE"
+	builtin history -a "$HISTGLOBAL"
+	builtin history -c
+	#env cat "$HISTGLOBAL" > "$HISTFILE"
+	#env cat "$HISTSESSION" >> "$HISTFILE"
+	builtin history -r "$HISTGLOBAL"
+	builtin history -r "$HISTFILE"
+}
+function history_merge {
+	_orphants _merge
+}
+#
+function history {
+	_bash_history
+	builtin history "$@"
+}
+[[ "${PROMPT_COMMAND}" != *"_bash_history"* ]] && export PROMPT_COMMAND="_bash_history ; ${PROMPT_COMMAND}"
