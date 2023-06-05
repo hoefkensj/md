@@ -40,4 +40,4 @@ function merge2sys(){
 
 }
 merge2sys $@
-unset merge2sys
+unset merge2sy

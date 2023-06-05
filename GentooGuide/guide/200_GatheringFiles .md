@@ -42,12 +42,15 @@ tar xpvJf stage3-*.tar.xz --xattrs-include='*.*' --numeric-owner --directory /mn
 ## Some Extra Folders
 
 ```BASH
-install -m 775 -d /mnt/gentoo/{Volumes,etc/portage/{package.{accept_keywords,license,mask,unmask,use,env},repos.conf},opt/{bin,scripts,local/{bin,scripts,config/rc/bash}}}
-mkdir -p /mnt/install/{git,scripts/{superadduser,sourcedir}}
-chown -R root:100 ./{opt,Volumes}
+install -m 775 -d /mnt/gentoo/Volumes
+install -m 775 -d /mnt/gentoo/etc/portage/package.{accept_keywords,license,mask,unmask,use,env}
+install -m 775 -d /mnt/gentoo/etc/portage/repos.conf
+install -m 775 -d /mnt/gentoo/opt/{bin,sh,scripts}
+install -m 775 -d /mnt/gentoo/opt/local/{bin,sh,scripts}
+install -m 775 -d /mnt/gentoo/opt/local/config/rc/bash
+chown -Rv root:100 /mnt/gentoo/{opt,Volumes}
 
-Automate the Stage3 Downloads (tarbal and verificationkeys)
-
+mkdir -pv /mnt/install/{git,scripts}
 ```
 
 ## Extra Scripts
@@ -55,8 +58,11 @@ Automate the Stage3 Downloads (tarbal and verificationkeys)
 ### superadduser (Slackware)
 
 ```bash
-curl https://gitweb.gentoo.org/repo/gentoo.git/plain/app-admin/superadduser/files/1.15/superadduser -o  /mnt/install/scripts/superadduser/superadduser.sh 
-install -D scripts/superadduser/* /mnt/gentoo/opt/local/scripts/
+curl https://gitweb.gentoo.org/repo/gentoo.git/plain/app-admin/superadduser/files/1.15/superadduser -o  /mnt/install/scripts/superadduser/superadduser.sh
+chmod +x /mnt/install/scripts/superadduser/superadduser.sh
+install -D /mnt/install/scripts/superadduser/* /mnt/gentoo/opt/local/scripts/
+ln -sv /opt/local/scripts/superadduser.sh /opt/local/sh/superadduser
+
 
 ```
 
